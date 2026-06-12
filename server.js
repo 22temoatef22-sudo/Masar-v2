@@ -1,5 +1,5 @@
-// Masar v2 Server — Node.js
-// Handles: search, city-boundary, generate-map, finalize
+// Masar v2 Server — Fixed
+// Base map via D3 (reliable) + tile fetching for finalize
 
 const express = require("express");
 const cors    = require("cors");
@@ -10,7 +10,7 @@ const fs      = require("fs");
 const os      = require("os");
 
 const { search, getCityBoundary, loadAll, loadGeoData } = require("./src/geodata");
-const { buildProjection, buildEquirectProjection, geometryToPixels, pointToPixel, getStylesList } = require("./src/renderer");
+const { buildProjection, buildEquirectProjection, geometryToPixels, pointToPixel, renderBaseMap } = require("./src/renderer");
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -19,19 +19,16 @@ app.use(cors());
 app.use(express.json({ limit:"50mb" }));
 loadAll().catch(console.error);
 
-// ── Health ─────────────────────────────────────────────────────
-app.get("/", (req, res) => res.json({ status:"ok", service:"Masar Server", version:"2.0.0" }));
+app.get("/", (req, res) => res.json({ status:"ok", service:"Masar v2 Server", version:"2.1.0" }));
 
-// ── Search ─────────────────────────────────────────────────────
 app.get("/search", async (req, res) => {
   try {
     const q = (req.query.q||"").trim();
-    if (!q || q.length < 2) return res.json({ results:[] });
+    if (!q||q.length<2) return res.json({ results:[] });
     res.json({ results: await search(q) });
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
 
-// ── City boundary ──────────────────────────────────────────────
 app.get("/city-boundary", async (req, res) => {
   try {
     const name = (req.query.name||"").trim();
@@ -43,25 +40,27 @@ app.get("/city-boundary", async (req, res) => {
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
 
-// ── Generate map (initial low-res tiles) ───────────────────────
+const EQUIRECT_STYLES = ["satellite", "satellite-film"];
+
 app.post("/generate-map", async (req, res) => {
   try {
     const { state={}, bbox, layers=[], style="dark", width=8192, height=4096 } = req.body;
     console.log(`[Masar v2] generate-map — style:${style}, ${width}x${height}, ${layers.length} layers`);
 
     // Build projection
-    const EQUIRECT_STYLES = ["satellite"];
+    const rawBbox = bbox || { minLon:-180, maxLon:180, minLat:-85, maxLat:85 };
     const projection = EQUIRECT_STYLES.includes(style)
       ? buildEquirectProjection(width, height)
-      : buildProjection(bbox||{minLon:-180,maxLon:180,minLat:-85,maxLat:85}, width, height);
+      : buildProjection(rawBbox, width, height);
 
-    // Fetch base map tiles
-    const mapBuffer = await fetchBaseTiles(state, style, width, height);
-    const base64 = mapBuffer ? mapBuffer.toString("base64") : null;
+    // Generate base map via D3 (reliable, no external tile deps)
+    const world = await loadGeoData("countries");
+    const mapBuffer = await renderBaseMap(world, rawBbox, { width, height, style, projection });
+    const base64 = mapBuffer.toString("base64");
 
     // Convert geometries to pixel coords
     const pixelLayers = layers.map(layer => {
-      const result = { id:layer.id, name:layer.name, type:layer.type, mode:layer.mode||"shape", color:layer.color };
+      const result = { id:layer.id, name:layer.name, type:layer.type, mode:layer.mode||"shape", color:layer.color||"#f97316" };
       if (!layer.geometry) return result;
       if (layer.geometry.type==="Point" || layer.mode==="point") {
         const [x,y] = pointToPixel(layer.geometry, projection);
@@ -73,62 +72,50 @@ app.post("/generate-map", async (req, res) => {
       return result;
     });
 
-    res.json({
-      success:  true,
-      map:      base64,
-      metadata: { width, height, style, layers:pixelLayers, mapW:width, mapH:height },
-    });
+    console.log(`[Masar v2] Done! map size: ${mapBuffer.length} bytes`);
+    res.json({ success:true, map:base64, metadata:{ width, height, style, layers:pixelLayers, mapW:width, mapH:height } });
   } catch(e) {
     console.error("[Masar v2] generate-map error:", e.message);
     res.status(500).json({ error:e.message });
   }
 });
 
-// ── Finalize (high-res tiles for each zoom level used) ─────────
+// Finalize — fetch high-res tiles per zoom level
 app.post("/finalize", async (req, res) => {
   try {
     const { keyframes=[], style="dark", compW=3840, compH=2160 } = req.body;
-    console.log(`[Masar v2] finalize — ${keyframes.length} keyframes, style:${style}`);
+    console.log(`[Masar v2] finalize — ${keyframes.length} KFs, style:${style}`);
 
     if (!keyframes.length) return res.json({ success:false, error:"No keyframes" });
 
-    // Get all unique zoom levels used
-    const zoomLevels = [...new Set(keyframes.map(kf => Math.round(kf.state.zoom)))];
-    console.log("[Masar v2] Zoom levels:", zoomLevels);
-
+    const zoomLevels = [...new Set(keyframes.map(kf => Math.round(kf.state.zoom||2)))];
     const tiles = [];
 
     for (const zoom of zoomLevels) {
-      // Find keyframes at this zoom level
-      const kfsAtZoom = keyframes.filter(kf => Math.round(kf.state.zoom) === zoom);
-      if (!kfsAtZoom.length) continue;
-
-      // Get center point for this zoom level
+      const kfsAtZoom = keyframes.filter(kf => Math.round(kf.state.zoom||2) === zoom);
       const kf = kfsAtZoom[Math.floor(kfsAtZoom.length/2)];
-      const state = kf.state;
 
-      // Fetch high-res tiles for this zoom level
       try {
-        const tileBuf = await fetchBaseTiles(state, style, compW, compH, zoom);
-        if (!tileBuf) continue;
+        // Try to fetch satellite tiles, fallback to D3
+        let tileBuf = null;
+        if (style === "satellite") {
+          tileBuf = await fetchSatelliteTiles(kf.state.lat||25, kf.state.lon||30, zoom, compW, compH);
+        }
 
-        // Save tile to temp file
+        // Fallback: D3 render at this zoom level
+        if (!tileBuf) {
+          const world = await loadGeoData("countries");
+          const proj  = buildProjection({ minLon:-180,maxLon:180,minLat:-85,maxLat:85 }, compW, compH);
+          tileBuf = await renderBaseMap(world, { minLon:-180,maxLon:180,minLat:-85,maxLat:85 }, { width:compW, height:compH, style, projection:proj });
+        }
+
         const tilePath = path.join(os.tmpdir(), `masar2_tile_z${zoom}_${Date.now()}.png`);
         await fs.promises.writeFile(tilePath, tileBuf);
 
-        // Calculate time range for this zoom level
         const inKf  = kfsAtZoom[0];
         const outKf = kfsAtZoom[kfsAtZoom.length-1];
-
-        tiles.push({
-          zoom,
-          path:    tilePath,
-          inTime:  inKf.time - 0.5,
-          outTime: outKf.time + 0.5,
-          center:  { lat:state.lat, lon:state.lon },
-        });
-
-        console.log(`[Masar v2] Tile Z${zoom} saved: ${tilePath}`);
+        tiles.push({ zoom, path:tilePath, inTime:inKf.time-0.5, outTime:outKf.time+0.5 });
+        console.log(`[Masar v2] Tile Z${zoom} saved`);
       } catch(e) {
         console.error(`[Masar v2] Tile Z${zoom} failed:`, e.message);
       }
@@ -141,28 +128,14 @@ app.post("/finalize", async (req, res) => {
   }
 });
 
-// ── Tile fetching helpers ──────────────────────────────────────
+// Satellite tile fetching
 const tileCache = {};
-
-async function fetchTile(z, x, y, style) {
-  const key = `${style}/${z}/${x}/${y}`;
+async function fetchSatTile(z, x, y) {
+  const key = `${z}/${x}/${y}`;
   if (tileCache[key]) return tileCache[key];
-
-  let url;
-  if (style === "satellite") {
-    url = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
-  } else if (style === "topo") {
-    url = `https://tile.opentopomap.org/${z}/${x}/${y}.png`;
-  } else {
-    // OpenFreeMap raster fallback
-    url = `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
-  }
-
   try {
-    const res = await fetch(url, {
-      timeout: 10000,
-      headers: { "User-Agent": "MasarPlugin/2.0 (shuwaz.com)" }
-    });
+    const url = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
+    const res = await fetch(url, { timeout:8000 });
     if (!res.ok) return null;
     const buf = await res.buffer();
     tileCache[key] = buf;
@@ -170,96 +143,52 @@ async function fetchTile(z, x, y, style) {
   } catch(e) { return null; }
 }
 
-function lonToTileX(lon, z) { return Math.floor((lon+180)/360*Math.pow(2,z)); }
-function latToTileY(lat, z) {
-  const r = lat*Math.PI/180;
-  return Math.floor((1-Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2*Math.pow(2,z));
-}
-function tileXToLon(x, z) { return x/Math.pow(2,z)*360-180; }
-function tileYToLat(y, z) {
-  const n = Math.PI-2*Math.PI*y/Math.pow(2,z);
-  return 180/Math.PI*Math.atan(0.5*(Math.exp(n)-Math.exp(-n)));
-}
+function lonToTileX(lon,z){ return Math.floor((lon+180)/360*Math.pow(2,z)); }
+function latToTileY(lat,z){ const r=lat*Math.PI/180; return Math.floor((1-Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2*Math.pow(2,z)); }
 
-function stateToZoomLevel(mapZoom) {
-  // MapLibre zoom → tile zoom
-  return Math.max(1, Math.min(18, Math.round(mapZoom)));
-}
+async function fetchSatelliteTiles(lat, lon, zoom, width, height) {
+  const TILE=256;
+  const cx=lonToTileX(lon,zoom), cy=latToTileY(lat,zoom);
+  const tw=Math.ceil(width/TILE)+2, th=Math.ceil(height/TILE)+2;
+  const x0=cx-Math.floor(tw/2), y0=cy-Math.floor(th/2);
 
-async function fetchBaseTiles(state, style, width, height, overrideZoom) {
-  const lat  = state.lat  || 25;
-  const lon  = state.lon  || 20;
-  const zoom = overrideZoom !== undefined ? overrideZoom : stateToZoomLevel(state.zoom || 2);
-
-  const TILE = 256;
-  const tilesX = Math.ceil(width  / TILE) + 2;
-  const tilesY = Math.ceil(height / TILE) + 2;
-
-  const centerX = lonToTileX(lon, zoom);
-  const centerY = latToTileY(lat, zoom);
-
-  const startX = centerX - Math.floor(tilesX/2);
-  const startY = centerY - Math.floor(tilesY/2);
-  const endX   = startX + tilesX;
-  const endY   = startY + tilesY;
-
-  // Safety check — don't fetch too many tiles
-  if ((endX-startX) * (endY-startY) > 64) {
-    console.log("[Masar v2] Too many tiles, skipping");
-    return null;
-  }
+  if (tw*th > 36) return null; // too many tiles
 
   const { createCanvas, Image } = require("canvas");
-  const canvas = createCanvas(tilesX*TILE, tilesY*TILE);
-  const ctx    = canvas.getContext("2d");
-  ctx.fillStyle = style === "dark" ? "#0a0a0a" : "#f0f0f0";
-  ctx.fillRect(0, 0, tilesX*TILE, tilesY*TILE);
+  const canvas=createCanvas(tw*TILE,th*TILE), ctx=canvas.getContext("2d");
+  ctx.fillStyle="#000"; ctx.fillRect(0,0,tw*TILE,th*TILE);
 
-  let loaded = 0;
-  const tasks = [];
+  let loaded=0;
+  await Promise.all(Array.from({length:tw*th},(_,i)=>{
+    const tx=x0+Math.floor(i/th), ty=y0+(i%th);
+    return (async()=>{
+      const buf=await fetchSatTile(zoom,tx,ty); if(!buf) return;
+      try {
+        const img=new Image();
+        await new Promise((res,rej)=>{img.onload=res;img.onerror=rej;img.src=buf;});
+        ctx.drawImage(img,(tx-x0)*TILE,(ty-y0)*TILE); loaded++;
+      } catch(e){}
+    })();
+  }));
 
-  for (let tx = startX; tx < endX; tx++) {
-    for (let ty = startY; ty < endY; ty++) {
-      tasks.push((async (tx, ty) => {
-        const buf = await fetchTile(zoom, tx, ty, style);
-        if (!buf) return;
-        try {
-          const img = new Image();
-          await new Promise((resolve, reject) => {
-            img.onload  = resolve;
-            img.onerror = reject;
-            img.src = buf;
-          });
-          const px = (tx - startX) * TILE;
-          const py = (ty - startY) * TILE;
-          ctx.drawImage(img, px, py);
-          loaded++;
-        } catch(e) {}
-      })(tx, ty));
-    }
-  }
+  if (loaded===0) return null;
 
-  await Promise.all(tasks);
-  console.log(`[Masar v2] Loaded ${loaded}/${tasks.length} tiles at Z${zoom}`);
-
-  if (loaded === 0) return null;
-
-  // Crop to exact dimensions centered on target
-  const centerPixelX = (centerX - startX) * TILE + TILE/2;
-  const centerPixelY = (centerY - startY) * TILE + TILE/2;
-  const cropX = Math.max(0, Math.round(centerPixelX - width/2));
-  const cropY = Math.max(0, Math.round(centerPixelY - height/2));
-
+  const px=Math.max(0,(cx-x0)*TILE+TILE/2-width/2);
+  const py=Math.max(0,(cy-y0)*TILE+TILE/2-height/2);
   return sharp(canvas.toBuffer("image/png"))
-    .extract({
-      left:   Math.min(cropX, tilesX*TILE - width),
-      top:    Math.min(cropY, tilesY*TILE - height),
-      width:  Math.min(width,  tilesX*TILE),
-      height: Math.min(height, tilesY*TILE),
-    })
-    .resize(width, height)
-    .png()
-    .toBuffer();
+    .extract({left:Math.round(px),top:Math.round(py),width:Math.min(width,tw*TILE),height:Math.min(height,th*TILE)})
+    .resize(width,height).png().toBuffer();
 }
 
-app.listen(PORT, () => console.log(`[Masar v2] Server running on port ${PORT}`));
+function flattenCoords(g) {
+  if (!g) return [];
+  switch(g.type) {
+    case "Point": return [g.coordinates];
+    case "MultiPoint": case "LineString": return g.coordinates;
+    case "MultiLineString": case "Polygon": return g.coordinates.flat();
+    case "MultiPolygon": return g.coordinates.flat(2);
+    default: return [];
+  }
+}
+
+app.listen(PORT, () => console.log(`[Masar v2] Server v2.1 running on port ${PORT}`));
