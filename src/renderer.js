@@ -1,5 +1,5 @@
 const { createCanvas } = require("canvas");
-const { geoNaturalEarth1, geoEquirectangular, geoPath, geoGraticule } = require("d3-geo");
+const { geoNaturalEarth1, geoEquirectangular, geoPath, geoGraticule, geoMercator } = require("d3-geo");
 const sharp = require("sharp");
 const fetch = require("node-fetch");
 
@@ -21,7 +21,6 @@ const STYLES = {
 };
 
 function getStyle(k) {
-  // Normalize CEP style names to renderer styles
   const map = { "light":"light", "positron":"light", "dark":"dark", "liberty":"light",
                 "satellite":"satellite", "topo":"topo", "terrain":"terrain", "voyager":"voyager" };
   return STYLES[map[k] || k] || STYLES["dark"];
@@ -29,16 +28,15 @@ function getStyle(k) {
 
 // ── Projection — zooms to bbox ────────────────────────────────
 function buildProjection(bbox, width, height) {
-  const proj = geoNaturalEarth1()
+  // التعديل هنا: استخدام geoMercator ليتطابق مع MapLibre
+  const proj = geoMercator()
     .scale(width / (2 * Math.PI))
     .translate([width / 2, height / 2]);
 
-  // Full world: don't zoom
   const spanLon = (bbox.maxLon || 180) - (bbox.minLon || -180);
   const spanLat = (bbox.maxLat || 85)  - (bbox.minLat || -85);
   if (spanLon > 300 || spanLat > 150) return proj;
 
-  // Zoom to bbox with padding
   const pad = Math.min(width, height) * 0.06;
   proj.fitExtent(
     [[pad, pad], [width - pad, height - pad]],
