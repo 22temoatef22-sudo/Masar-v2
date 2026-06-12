@@ -2,91 +2,59 @@ const { createCanvas } = require("canvas");
 const { geoNaturalEarth1, geoEquirectangular, geoPath, geoGraticule } = require("d3-geo");
 const sharp = require("sharp");
 const fetch = require("node-fetch");
-const path  = require("path");
-const fs    = require("fs");
 
-// ── Inline styles — no external files needed ──────────────────
+// ── Inline styles ─────────────────────────────────────────────
 const STYLES = {
-  "dark": {
-    ocean:"#080c14", land:"#141c28", border:"#2a3550",
-    graticule:"#0f1520", vignette:true, vignetteColor:"#000000",
-    vignetteStrength:0.5, grain:true, grainStrength:0.03
-  },
-  "dark-pro": {
-    ocean:"#080c14", land:"#141c28", border:"#2a3550",
-    graticule:"#0f1520", vignette:true, vignetteColor:"#000000",
-    vignetteStrength:0.5, grain:true, grainStrength:0.03
-  },
-  "light": {
-    ocean:"#a8c8e8", land:"#f0ede0", border:"#999999",
-    graticule:"#cccccc", vignette:false, grain:false
-  },
-  "positron": {
-    ocean:"#a8c8e8", land:"#f0ede0", border:"#999999",
-    graticule:"#cccccc", vignette:false, grain:false
-  },
-  "political": {
-    ocean:"#4a90d9", land:"#e8e0d0", border:"#666666",
-    graticule:"#aaaaaa", vignette:false, grain:false
-  },
-  "vintage-atlas": {
-    ocean:"#7ba7bc", land:"#f4e4c1", border:"#8b6914",
-    graticule:"#c4a862", vignette:true, vignetteColor:"#3a2010",
-    vignetteStrength:0.4, grain:true, grainStrength:0.04
-  },
-  "terrain": {
-    ocean:"#6ba7d6", land:"#c8b98a", border:"#8b7040",
-    graticule:"#b09060", vignette:false, grain:true, grainStrength:0.02
-  },
-  "satellite": {
-    ocean:"#061018", land:"#0a1a0a", border:"#1a3a1a",
-    graticule:"#0a2010", vignette:true, vignetteColor:"#000000",
-    vignetteStrength:0.6, grain:true, grainStrength:0.02
-  },
-  "satellite-film": {
-    ocean:"#061018", land:"#0a1a0a", border:"#1a3a1a",
-    graticule:"#0a2010", vignette:true, vignetteColor:"#000000",
-    vignetteStrength:0.6, grain:true, grainStrength:0.02
-  },
-  "topo": {
-    ocean:"#7ba7bc", land:"#d4c9a0", border:"#8b7040",
-    graticule:"#b09060", vignette:false, grain:false
-  },
+  "dark":          { ocean:"#080c14", land:"#141c28", border:"#2a3550", graticule:"#0f1520", vignette:true,  vignetteColor:"#000000", vignetteStrength:0.5, grain:true,  grainStrength:0.03 },
+  "dark-pro":      { ocean:"#080c14", land:"#141c28", border:"#2a3550", graticule:"#0f1520", vignette:true,  vignetteColor:"#000000", vignetteStrength:0.5, grain:true,  grainStrength:0.03 },
+  "light":         { ocean:"#a8c8e8", land:"#f0ede0", border:"#999999", graticule:"#cccccc", vignette:false, grain:false },
+  "positron":      { ocean:"#a8c8e8", land:"#f0ede0", border:"#999999", graticule:"#cccccc", vignette:false, grain:false },
+  "political":     { ocean:"#4a90d9", land:"#e8e0d0", border:"#666666", graticule:"#aaaaaa", vignette:false, grain:false },
+  "vintage-atlas": { ocean:"#7ba7bc", land:"#f4e4c1", border:"#8b6914", graticule:"#c4a862", vignette:true,  vignetteColor:"#3a2010", vignetteStrength:0.4, grain:true,  grainStrength:0.04 },
+  "terrain":       { ocean:"#6ba7d6", land:"#c8b98a", border:"#8b7040", graticule:"#b09060", vignette:false, grain:true,  grainStrength:0.02 },
+  "satellite":     { ocean:"#061018", land:"#0a1a0a", border:"#1a3a1a", graticule:"#0a2010", vignette:true,  vignetteColor:"#000000", vignetteStrength:0.6, grain:true,  grainStrength:0.02 },
+  "satellite-film":{ ocean:"#061018", land:"#0a1a0a", border:"#1a3a1a", graticule:"#0a2010", vignette:true,  vignetteColor:"#000000", vignetteStrength:0.6, grain:true,  grainStrength:0.02 },
+  "topo":          { ocean:"#7ba7bc", land:"#d4c9a0", border:"#8b7040", graticule:"#b09060", vignette:false, grain:false },
+  // Map CEP style names → renderer style names
+  "liberty":       { ocean:"#a8c8e8", land:"#f0ede0", border:"#999999", graticule:"#cccccc", vignette:false, grain:false },
+  "voyager":       { ocean:"#a8c8e8", land:"#e8e4d8", border:"#aaaaaa", graticule:"#cccccc", vignette:false, grain:false },
 };
 
 function getStyle(k) {
-  return STYLES[k] || STYLES["dark"];
+  // Normalize CEP style names to renderer styles
+  const map = { "light":"light", "positron":"light", "dark":"dark", "liberty":"light",
+                "satellite":"satellite", "topo":"topo", "terrain":"terrain", "voyager":"voyager" };
+  return STYLES[map[k] || k] || STYLES["dark"];
 }
 
-// ── Projections ───────────────────────────────────────────────
+// ── Projection — zooms to bbox ────────────────────────────────
 function buildProjection(bbox, width, height) {
   const proj = geoNaturalEarth1()
     .scale(width / (2 * Math.PI))
     .translate([width / 2, height / 2]);
 
-  // If bbox covers most of the world, use full world view
-  const bboxSpanLon = (bbox.maxLon || 180) - (bbox.minLon || -180);
-  const bboxSpanLat = (bbox.maxLat || 85)  - (bbox.minLat || -85);
-  if (bboxSpanLon > 300 || bboxSpanLat > 150) return proj;
+  // Full world: don't zoom
+  const spanLon = (bbox.maxLon || 180) - (bbox.minLon || -180);
+  const spanLat = (bbox.maxLat || 85)  - (bbox.minLat || -85);
+  if (spanLon > 300 || spanLat > 150) return proj;
 
-  // Zoom to bbox using fitExtent
-  const padding = Math.min(width, height) * 0.05;
-  const geoJson = {
-    type: "Feature",
-    geometry: {
-      type: "Polygon",
-      coordinates: [[
-        [bbox.minLon, bbox.minLat],
-        [bbox.maxLon, bbox.minLat],
-        [bbox.maxLon, bbox.maxLat],
-        [bbox.minLon, bbox.maxLat],
-        [bbox.minLon, bbox.minLat],
-      ]]
-    }
-  };
+  // Zoom to bbox with padding
+  const pad = Math.min(width, height) * 0.06;
   proj.fitExtent(
-    [[padding, padding], [width - padding, height - padding]],
-    geoJson
+    [[pad, pad], [width - pad, height - pad]],
+    {
+      type: "Feature",
+      geometry: {
+        type: "Polygon",
+        coordinates: [[
+          [bbox.minLon, bbox.minLat],
+          [bbox.maxLon, bbox.minLat],
+          [bbox.maxLon, bbox.maxLat],
+          [bbox.minLon, bbox.maxLat],
+          [bbox.minLon, bbox.minLat],
+        ]]
+      }
+    }
   );
   return proj;
 }
@@ -97,7 +65,7 @@ function buildEquirectProjection(width, height) {
     .translate([width / 2, height / 2]);
 }
 
-// ── ESRI tile fetching ────────────────────────────────────────
+// ── ESRI satellite tile fetching ──────────────────────────────
 const ESRI_MAP = { "satellite":"World_Imagery", "satellite-film":"World_Imagery" };
 const tileCache = {};
 
@@ -125,11 +93,10 @@ async function stitchESRI(bbox, width, height, service) {
   const y0=latToTileY(bbox.maxLat,zoom), y1=latToTileY(bbox.minLat,zoom);
   const TILE=256, tw=x1-x0+1, th=y1-y0+1;
   if (tw>8||th>8) return null;
-
   const canvas=createCanvas(tw*TILE,th*TILE), ctx=canvas.getContext("2d");
   let loaded=0;
   const tasks=[];
-  for(let ty=y0;ty<=y1;ty++) for(let tx=x0;tx<=x1;tx++) {
+  for(let ty=y0;ty<=y1;ty++) for(let tx=x0;tx<=x1;tx++){
     tasks.push((async(tx,ty)=>{
       const buf=await fetchTile(service,zoom,tx,ty); if(!buf) return;
       try {
@@ -141,7 +108,6 @@ async function stitchESRI(bbox, width, height, service) {
   }
   await Promise.all(tasks);
   if (loaded===0) return null;
-
   const tLonR=tileXToLon(x1+1,zoom)-tileXToLon(x0,zoom);
   const tLatR=tileYToLat(y0,zoom)-tileYToLat(y1+1,zoom);
   const cX=Math.max(0,Math.floor((bbox.minLon-tileXToLon(x0,zoom))/tLonR*tw*TILE));
@@ -153,7 +119,7 @@ async function stitchESRI(bbox, width, height, service) {
 
 // ── D3 renderer ───────────────────────────────────────────────
 async function renderD3(world, width, height, styleKey, projection) {
-  const colors  = getStyle(styleKey);
+  const colors = getStyle(styleKey);
   const canvas  = createCanvas(width, height);
   const ctx     = canvas.getContext("2d");
   const pathFn  = geoPath(projection, ctx);
@@ -196,7 +162,7 @@ async function applyGrain(buf, W, H, strength) {
 
 // ── Main render ───────────────────────────────────────────────
 async function renderBaseMap(world, bbox, options={}) {
-  const { width=8192, height=4096, style="dark", projection:existingProj } = options;
+  const { width=1920, height=960, style="dark", projection:existingProj } = options;
   const projection = existingProj || buildProjection(bbox, width, height);
 
   const esriService = ESRI_MAP[style];
@@ -220,7 +186,7 @@ async function renderBaseMap(world, bbox, options={}) {
 function geometryToPixels(geometry, projection, compW, compH) {
   const rings = [];
   const toAE  = ([lon,lat]) => { const [x,y]=projection([lon,lat]); return [x-compW/2, y-compH/2]; };
-  if (geometry.type==="Polygon")          rings.push(geometry.coordinates[0].map(toAE));
+  if (geometry.type==="Polygon")           rings.push(geometry.coordinates[0].map(toAE));
   else if (geometry.type==="MultiPolygon") for(const p of geometry.coordinates) rings.push(p[0].map(toAE));
   else if (geometry.type==="LineString")   rings.push(geometry.coordinates.map(toAE));
   else if (geometry.type==="MultiLineString") for(const l of geometry.coordinates) rings.push(l.map(toAE));
