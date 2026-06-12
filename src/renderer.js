@@ -60,9 +60,35 @@ function getStyle(k) {
 
 // ── Projections ───────────────────────────────────────────────
 function buildProjection(bbox, width, height) {
-  return geoNaturalEarth1()
+  const proj = geoNaturalEarth1()
     .scale(width / (2 * Math.PI))
     .translate([width / 2, height / 2]);
+
+  // If bbox covers most of the world, use full world view
+  const bboxSpanLon = (bbox.maxLon || 180) - (bbox.minLon || -180);
+  const bboxSpanLat = (bbox.maxLat || 85)  - (bbox.minLat || -85);
+  if (bboxSpanLon > 300 || bboxSpanLat > 150) return proj;
+
+  // Zoom to bbox using fitExtent
+  const padding = Math.min(width, height) * 0.05;
+  const geoJson = {
+    type: "Feature",
+    geometry: {
+      type: "Polygon",
+      coordinates: [[
+        [bbox.minLon, bbox.minLat],
+        [bbox.maxLon, bbox.minLat],
+        [bbox.maxLon, bbox.maxLat],
+        [bbox.minLon, bbox.maxLat],
+        [bbox.minLon, bbox.minLat],
+      ]]
+    }
+  };
+  proj.fitExtent(
+    [[padding, padding], [width - padding, height - padding]],
+    geoJson
+  );
+  return proj;
 }
 
 function buildEquirectProjection(width, height) {
