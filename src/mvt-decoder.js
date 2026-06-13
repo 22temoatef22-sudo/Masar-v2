@@ -10,7 +10,7 @@ const fetch = require('node-fetch');
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-// ✅ تم إرجاع الرابط لشكله الأصلي الصحيح والمدعوم من OpenFreeMap
+// الرابط الأصلي الصحيح لـ OpenFreeMap
 const STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
 const ALLOWED_LAYERS = ['boundary', 'water', 'waterway'];
 const MAX_TILES = 64; 
@@ -68,8 +68,29 @@ async function discoverTileURL() {
   }
 
   console.log('[mvt-decoder] Fetching style.json from', STYLE_URL);
-  const res = await fetch(STYLE_URL);
-  if (!res.ok) throw new Error(`Failed to fetch style: ${res.status}`);
+  
+  // ✅ تمرير Headers لتجاوز حماية خوادم NGINX ضد طلبات node-fetch الافتراضية
+  const fetchOpts = {
+    headers: {
+      'Accept': 'application/json, text/plain, */*',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+  };
+
+  const res = await fetch(STYLE_URL, fetchOpts);
+
+  // ✅ إضافة Logging دقيق لتتبع استجابة السيرفر
+  console.log(`[mvt-decoder] Style fetch completed:`);
+  console.log(`  - Requested URL: ${STYLE_URL}`);
+  console.log(`  - Response Status: ${res.status} ${res.statusText}`);
+  console.log(`  - Final URL (redirects): ${res.url}`);
+  console.log(`  - Content-Type: ${res.headers.get('content-type')}`);
+
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error(`[mvt-decoder] Error body: ${errText.substring(0, 300)}`);
+    throw new Error(`Failed to fetch style: ${res.status}`);
+  }
 
   const style = await res.json();
   const sources = style.sources || {};
@@ -83,7 +104,15 @@ async function discoverTileURL() {
         break;
       }
       if (src.url) {
-        const tjRes = await fetch(src.url);
+        console.log(`[mvt-decoder] Fetching TileJSON from: ${src.url}`);
+        const tjRes = await fetch(src.url, fetchOpts);
+        
+        // ✅ سجلات متابعة مفصلة لطلب TileJSON
+        console.log(`[mvt-decoder] TileJSON fetch completed:`);
+        console.log(`  - Response Status: ${tjRes.status} ${tjRes.statusText}`);
+        console.log(`  - Final URL (redirects): ${tjRes.url}`);
+        console.log(`  - Content-Type: ${tjRes.headers.get('content-type')}`);
+
         if (tjRes.ok) {
           const tj = await tjRes.json();
           if (tj.tiles && tj.tiles.length > 0) {
@@ -91,6 +120,9 @@ async function discoverTileURL() {
             console.log(`[mvt-decoder] Found tiles via TileJSON "${name}": ${tileURL}`);
             break;
           }
+        } else {
+           const tjErr = await tjRes.text();
+           console.error(`[mvt-decoder] TileJSON Error body: ${tjErr.substring(0, 300)}`);
         }
       }
     }
@@ -134,7 +166,14 @@ async function fetchAndDecodeTile(tileURL, x, y, z) {
 
   let res;
   try {
-    res = await fetch(url);
+    // ✅ نستخدم نفس الخيارات (الـ Headers) هنا تحسباً لوجود نفس الحماية على تحميل الـ pbf
+    const fetchOpts = {
+      headers: {
+        'Accept': 'application/x-protobuf, application/octet-stream, */*',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }
+    };
+    res = await fetch(url, fetchOpts);
   } catch (err) {
     console.warn(`[mvt-decoder] Network error fetching tile ${z}/${x}/${y}: ${err.message}`);
     return [];
