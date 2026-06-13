@@ -1,4 +1,4 @@
-// Masar v2 Server — Final Production
+// Masar v2 Server — Full World Architecture
 const express = require("express");
 const cors    = require("cors");
 const fetch   = require("node-fetch");
@@ -8,7 +8,7 @@ const fs      = require("fs");
 const os      = require("os");
 
 const { search, getCityBoundary, loadAll, loadGeoData } = require("./src/geodata");
-const { buildProjection, buildEquirectProjection, geometryToPixels, pointToPixel, renderBaseMap } = require("./src/renderer");
+const { buildProjection, geometryToPixels, pointToPixel, renderBaseMap } = require("./src/renderer");
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -17,7 +17,7 @@ app.use(cors());
 app.use(express.json({ limit:"50mb" }));
 loadAll().catch(console.error);
 
-app.get("/", (req, res) => res.json({ status:"ok", service:"Masar v2 Server", version:"2.2.0" }));
+app.get("/", (req, res) => res.json({ status:"ok", service:"Masar v2 Server", version:"3.0.0" }));
 
 app.get("/search", async (req, res) => {
   try {
@@ -40,15 +40,18 @@ app.get("/city-boundary", async (req, res) => {
 
 app.post("/generate-map", async (req, res) => {
   try {
-    const { state={}, bbox, layers=[], style="dark", width=8192, height=4096 } = req.body;
-    console.log(`[Masar v2] generate-map — style:${style}, ${width}x${height}, ${layers.length} layers`);
+    // نتجاهل الأبعاد القادمة من الواجهة ونفرض خريطة العالم الكاملة
+    const { state={}, layers=[], style="dark" } = req.body;
+    
+    // إحداثيات خريطة العالم المربعة (Web Mercator Standard)
+    const FULL_WORLD_BBOX = { minLon: -180, maxLon: 180, minLat: -85.05112878, maxLat: 85.05112878 };
+    const MAP_SIZE = 2048; // سريع جداً ليكون Base Map
 
-    const rawBbox = bbox || { minLon:-180, maxLon:180, minLat:-85, maxLat:85 };
-    const projection = buildProjection(rawBbox, width, height);
+    console.log(`[Masar v2] generate-map — FULL WORLD mode, style:${style}`);
 
-    // الرندر أصبح يعتمد كلياً على renderer.js المطور
+    const projection = buildProjection(FULL_WORLD_BBOX, MAP_SIZE, MAP_SIZE);
     const world = await loadGeoData("countries");
-    const mapBuffer = await renderBaseMap(world, rawBbox, { width, height, style, projection });
+    const mapBuffer = await renderBaseMap(world, FULL_WORLD_BBOX, { width: MAP_SIZE, height: MAP_SIZE, style, projection });
     const base64 = mapBuffer.toString("base64");
 
     const pixelLayers = layers.map(layer => {
@@ -58,25 +61,28 @@ app.post("/generate-map", async (req, res) => {
         const [x,y] = pointToPixel(layer.geometry, projection);
         result.pixelX=x; result.pixelY=y; result.geometryType="point";
       } else {
-        result.rings = geometryToPixels(layer.geometry, projection, width, height);
+        result.rings = geometryToPixels(layer.geometry, projection, MAP_SIZE, MAP_SIZE);
         result.geometryType = layer.geometry.type.includes("Line") ? "line" : "polygon";
       }
       return result;
     });
 
-    console.log(`[Masar v2] Done! map size: ${mapBuffer.length} bytes`);
-    res.json({ success:true, map:base64, metadata:{ width, height, style, layers:pixelLayers, mapW:width, mapH:height } });
+    // إرسال الـ state مهم جداً لمحرك الـ Expressions القادم
+    res.json({ 
+      success:true, map:base64, 
+      metadata:{ mapW:MAP_SIZE, mapH:MAP_SIZE, style, layers:pixelLayers, state:state } 
+    });
   } catch(e) {
     console.error("[Masar v2] generate-map error:", e.message);
     res.status(500).json({ error:e.message });
   }
 });
 
-// ── منطق Finalize الجديد (يدعم جميع أساليب الخرائط) ──
-const TILE_PROVIDERS = {
-  "dark":           "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-  "light":          "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-  "topo":           "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+// ── منطق Finalize المحدث لدعم No Labels لجميع الأساليب ──
+const TILE_PROVIDERS_NOLABELS = {
+  "dark":           "https://basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}.png",
+  "light":          "https://basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}.png",
+  "topo":           "https://server.arcgisonline.com/ArcGIS/rest/services/World_Physical_Map/MapServer/tile/{z}/{y}/{x}",
   "satellite":      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 };
 
@@ -103,7 +109,7 @@ async function fetchFinalizeTiles(lat, lon, zoom, width, height, style) {
 
   if (tw*th > 36) return null;
 
-  const template = TILE_PROVIDERS[style] || TILE_PROVIDERS["dark"];
+  const template = TILE_PROVIDERS_NOLABELS[style] || TILE_PROVIDERS_NOLABELS["dark"];
   const { createCanvas, Image } = require("canvas");
   const canvas=createCanvas(tw*TILE,th*TILE), ctx=canvas.getContext("2d");
   ctx.fillStyle="#000"; ctx.fillRect(0,0,tw*TILE,th*TILE);
@@ -133,15 +139,11 @@ async function fetchFinalizeTiles(lat, lon, zoom, width, height, style) {
 
 app.post("/finalize", async (req, res) => {
   try {
-    // تبسيط ستايلات الـ CEP للأساليب المتاحة
     let { keyframes=[], style="dark", compW=3840, compH=2160 } = req.body;
     const styleMap = { "positron":"light", "liberty":"light", "voyager":"topo", "satellite-film":"satellite" };
     style = styleMap[style] || style;
     
-    console.log(`[Masar v2] finalize — ${keyframes.length} KFs, mapped style:${style}`);
-
     if (!keyframes.length) return res.json({ success:false, error:"No keyframes" });
-
     const zoomLevels = [...new Set(keyframes.map(kf => Math.round(kf.state.zoom||2)))];
     const tiles = [];
 
@@ -154,21 +156,13 @@ app.post("/finalize", async (req, res) => {
         if (tileBuf) {
           const tilePath = path.join(os.tmpdir(), `masar2_tile_z${zoom}_${Date.now()}.png`);
           await fs.promises.writeFile(tilePath, tileBuf);
-          const inKf  = kfsAtZoom[0];
-          const outKf = kfsAtZoom[kfsAtZoom.length-1];
+          const inKf  = kfsAtZoom[0], outKf = kfsAtZoom[kfsAtZoom.length-1];
           tiles.push({ zoom, path:tilePath, inTime:inKf.time-0.5, outTime:outKf.time+0.5 });
-          console.log(`[Masar v2] Tile Z${zoom} saved`);
         }
-      } catch(e) {
-        console.error(`[Masar v2] Tile Z${zoom} failed:`, e.message);
-      }
+      } catch(e) { console.error(`[Masar v2] Tile Z${zoom} failed:`, e.message); }
     }
-
     res.json({ success:true, metadata:{ tiles, zoomLevels } });
-  } catch(e) {
-    console.error("[Masar v2] finalize error:", e.message);
-    res.status(500).json({ error:e.message });
-  }
+  } catch(e) { res.status(500).json({ error:e.message }); }
 });
 
-app.listen(PORT, () => console.log(`[Masar v2] Server v2.2 running on port ${PORT}`));
+app.listen(PORT, () => console.log(`[Masar v2] Server v3.0 running on port ${PORT}`));
