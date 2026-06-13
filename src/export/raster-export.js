@@ -124,12 +124,11 @@ async function exportRaster(options) {
   var downloadStart = Date.now();
   
   var downloadResult = await downloader.downloadTiles({
-    type: 'raster',
-    provider: options.provider,
-    styleId: nativeStyleId, 
-    tiles: tileList,
-    signal: options.signal
-  });
+  type: 'raster',
+  ofmStyleId: nativeStyleId,
+  tiles: tileList,
+  signal: options.signal
+});
   
   var downloadDuration = Date.now() - downloadStart;
   dbg(`Download phase complete in ${downloadDuration}ms`);
