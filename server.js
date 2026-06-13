@@ -1,197 +1,243 @@
 /**
- * Masar v2 — Server
- * 
- * Express server providing:
- *   POST /vector-map   — MVT → GeoJSON → pixel geometry (Phase 1 MVP)
- *   GET  /search        — City/country search (existing)
- *   POST /city-boundary — Get boundary for a city (existing)
- *   POST /generate-map  — Legacy D3/PNG map generation (existing, kept for compat)
- *   POST /finalize      — Legacy finalize (existing)
- *   GET  /health        — Health check
+ * Masar v3 — Central API Server
+ * * Orchestration layer. Contains no legacy D3/Canvas code.
+ * Routes requests directly to specialized raster/vector engines.
  */
+
+'use strict';
 
 const express = require('express');
 const cors = require('cors');
-const { decodeMVT } = require('./src/mvt-decoder');
-const { processGeoJSON } = require('./src/geo-processor');
 
-// Try loading existing modules (they may not exist yet in a fresh deploy)
-let geodata, renderer;
-try { geodata = require('./src/geodata'); } catch (_) { geodata = null; }
-try { renderer = require('./src/renderer'); } catch (_) { renderer = null; }
+// ── Engine Imports ─────────────────────────────────────────────────────────────
+const openfreemap = require('./src/providers/openfreemap');
+const { cache: tileCache } = require('./src/tiles/tile-cache');
+const { exportRaster } = require('./src/export/raster-export');
+const { exportVector } = require('./src/vector/vector-export');
+const { buildRoute } = require('./src/vector/route-engine');
 
 const app = express();
+
+// Middleware
 app.use(cors());
-app.use(express.json({ limit: '5mb' }));
+// 50mb limit to handle exceptionally large custom flight path / point arrays
+app.use(express.json({ limit: '50mb' })); 
 
-const PORT = process.env.PORT || 3000;
+// ── Diagnostics & Logging ──────────────────────────────────────────────────────
 
-// ── Style Colors ───────────────────────────────────────────────────────────────
+function dbg(namespace, msg) {
+  console.log(`[${namespace}] ${msg}`);
+}
 
-const STYLE_COLORS = {
-  dark:  { ocean: '#080c14', land: '#141c28', border: '#2a3550', water: '#0d1520', river: '#1a2a40' },
-  light: { ocean: '#a8c8e8', land: '#f0ede0', border: '#999999', water: '#a8c8e8', river: '#7cb4d4' },
-  topo:  { ocean: '#7ba7bc', land: '#d4c9a0', border: '#8b7040', water: '#7ba7bc', river: '#5a8fa8' },
-};
+// ── Centralized Response Helpers ───────────────────────────────────────────────
 
-// ── POST /vector-map ───────────────────────────────────────────────────────────
+function sendSuccess(res, namespace, data, startTime) {
+  const durationMs = Date.now() - startTime;
+  dbg(namespace, `200 OK (${durationMs}ms)`);
+  
+  res.status(200).json({
+    success: true,
+    ...data,
+    timing: {
+      startTime: new Date(startTime).toISOString(),
+      endTime: new Date().toISOString(),
+      durationMs: durationMs
+    }
+  });
+}
 
-app.post('/vector-map', async (req, res) => {
+function sendError(res, namespace, error, status = 500) {
+  const message = error instanceof Error ? error.message : String(error);
+  dbg(namespace, `${status} ERROR: ${message}`);
+  
+  res.status(status).json({
+    success: false,
+    error: message
+  });
+}
+
+// ── API Endpoints ──────────────────────────────────────────────────────────────
+
+/**
+ * 1) GET /health
+ * Returns system health, provider specs, and memory cache stats.
+ */
+app.get('/health', (req, res) => {
   const startTime = Date.now();
+  const namespace = 'server';
+  dbg(namespace, 'GET /health');
 
   try {
-    const {
-      bbox,
-      zoom = 4,
-      style = 'dark',
-      width = 3840,
-      height = 2160,
-    } = req.body;
+    const providerInfo = openfreemap.getProviderInfo();
+    const cacheStats = tileCache.getStats();
 
-    // Validate bbox
-    if (!bbox || !Array.isArray(bbox) || bbox.length !== 4) {
-      return res.status(400).json({
-        success: false,
-        error: 'bbox is required as [west, south, east, north]',
-      });
-    }
-
-    const [west, south, east, north] = bbox;
-    if (west >= east || south >= north) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid bbox: west must be < east, south must be < north',
-      });
-    }
-
-    console.log(`[vector-map] Request: bbox=[${bbox}], zoom=${zoom}, style=${style}, ${width}x${height}`);
-
-    // Step 1: Decode MVT tiles → GeoJSON
-    const geojson = await decodeMVT(bbox, zoom);
-    const decodeTime = Date.now() - startTime;
-    console.log(`[vector-map] MVT decode: ${geojson.features.length} features in ${decodeTime}ms`);
-
-    // Step 2: Process GeoJSON → pixel geometry
-    const result = processGeoJSON(geojson, bbox, width, height);
-    const processTime = Date.now() - startTime - decodeTime;
-    console.log(`[vector-map] Geo process: ${result.stats.totalShapes} shapes, ${result.stats.totalPoints} points in ${processTime}ms`);
-
-    // Step 3: Get style colors
-    const colors = STYLE_COLORS[style] || STYLE_COLORS.dark;
-
-    // Step 4: Build response
-    const response = {
-      success: true,
-      metadata: {
-        waterRings: result.waterRings,
-        borderRings: result.borderRings,
-        riverLines: result.riverLines,
-        style: colors,
-        mapW: width,
-        mapH: height,
-      },
-      stats: result.stats,
-      timing: {
-        decode: decodeTime,
-        process: processTime,
-        total: Date.now() - startTime,
-      },
+    const healthData = {
+      status: 'healthy',
+      version: '3.0.0',
+      provider: providerInfo,
+      cache: cacheStats
     };
 
-    // Check payload size
-    const payload = JSON.stringify(response);
-    const payloadKB = Math.round(payload.length / 1024);
-    console.log(`[vector-map] Payload: ${payloadKB}KB`);
+    sendSuccess(res, namespace, healthData, startTime);
+  } catch (err) {
+    sendError(res, namespace, err);
+  }
+});
 
-    if (payloadKB > 500) {
-      console.warn(`[vector-map] Payload ${payloadKB}KB exceeds 500KB limit!`);
-      // Still send it but warn — the client will need to handle this
+/**
+ * 2) POST /vector-map
+ * Orchestrates MVT decoding -> GeoJSON filtering -> Vector Alignment.
+ */
+app.post('/vector-map', async (req, res) => {
+  const startTime = Date.now();
+  const namespace = 'vector-map';
+  dbg(namespace, 'POST /vector-map');
+
+  try {
+    const { bbox, zoom, width, height, style, layers, simplify, clip, limits } = req.body;
+
+    const payload = await exportVector({
+      provider: 'openfreemap',
+      style: style || 'dark',
+      bbox: bbox,
+      zoom: zoom,
+      width: width,
+      height: height,
+      layers: layers,
+      simplify: simplify,
+      clip: clip,
+      limits: limits
+    });
+
+    const responseData = {
+      metadata: payload.metadata,
+      stats: payload.stats,
+      waterRings: payload.waterRings,
+      borderRings: payload.borderRings,
+      riverLines: payload.riverLines,
+      outputBounds: payload.outputBounds
+    };
+
+    sendSuccess(res, namespace, responseData, startTime);
+  } catch (err) {
+    sendError(res, namespace, err, 400);
+  }
+});
+
+/**
+ * 3) POST /raster-map
+ * Orchestrates Raster Download -> Sharp Pipeline -> Output encoding.
+ */
+app.post('/raster-map', async (req, res) => {
+  const startTime = Date.now();
+  const namespace = 'raster-map';
+  dbg(namespace, 'POST /raster-map');
+
+  try {
+    const { bbox, zoom, width, height, style, format, backgroundColor } = req.body;
+
+    const exportResult = await exportRaster({
+      provider: 'openfreemap',
+      style: style || 'dark',
+      bbox: bbox,
+      zoom: zoom,
+      width: width,
+      height: height,
+      format: format || 'png',
+      backgroundColor: backgroundColor
+    });
+
+    // Convert binary buffer to Base64 payload for Phase 1 JSON transmission
+    const imageBase64 = exportResult.buffer.toString('base64');
+
+    const responseData = {
+      image: imageBase64,
+      bounds: exportResult.bbox,
+      stats: exportResult.stats,
+      metadata: exportResult.metadata
+    };
+
+    sendSuccess(res, namespace, responseData, startTime);
+  } catch (err) {
+    sendError(res, namespace, err, 400);
+  }
+});
+
+/**
+ * 4) POST /route
+ * Generates Great Circle or straight IDL-safe paths for AE animations.
+ */
+app.post('/route', (req, res) => {
+  const startTime = Date.now();
+  const namespace = 'route';
+  dbg(namespace, 'POST /route');
+
+  try {
+    const { start, end, routeType, width, height, bbox, simplify, smooth } = req.body;
+
+    if (!start || !end) {
+      throw new Error("Missing 'start' or 'end' coordinate objects.");
     }
 
-    res.json(response);
-  } catch (err) {
-    console.error('[vector-map] Error:', err);
-    res.status(500).json({
-      success: false,
-      error: err.message,
+    const routeData = buildRoute({
+      points: [start, end],
+      bbox: bbox,
+      width: width,
+      height: height,
+      routeType: routeType,
+      simplify: simplify,
+      smooth: smooth
     });
-  }
-});
 
-// ── GET /search ────────────────────────────────────────────────────────────────
-
-app.get('/search', async (req, res) => {
-  if (!geodata) {
-    return res.status(501).json({ error: 'geodata module not available' });
-  }
-  try {
-    const q = req.query.q || '';
-    const results = await geodata.search(q);
-    res.json(results);
+    sendSuccess(res, namespace, routeData, startTime);
   } catch (err) {
-    console.error('[search] Error:', err);
-    res.status(500).json({ error: err.message });
+    sendError(res, namespace, err, 400);
   }
 });
 
-// ── POST /city-boundary ────────────────────────────────────────────────────────
+/**
+ * 5) GET /provider
+ * Fetches provider capabilities and supported styles.
+ */
+app.get('/provider', (req, res) => {
+  const startTime = Date.now();
+  const namespace = 'provider';
+  dbg(namespace, 'GET /provider');
 
-app.post('/city-boundary', async (req, res) => {
-  if (!geodata) {
-    return res.status(501).json({ error: 'geodata module not available' });
-  }
   try {
-    const { name, country } = req.body;
-    const boundary = await geodata.getCityBoundary(name, country);
-    res.json(boundary);
+    const providerInfo = openfreemap.getProviderInfo();
+    sendSuccess(res, namespace, providerInfo, startTime);
   } catch (err) {
-    console.error('[city-boundary] Error:', err);
-    res.status(500).json({ error: err.message });
+    sendError(res, namespace, err);
   }
 });
 
-// ── POST /generate-map (legacy — kept for compat) ──────────────────────────────
+/**
+ * 6) GET /cache
+ * Diagnostics for LRU memory management.
+ */
+app.get('/cache', (req, res) => {
+  const startTime = Date.now();
+  const namespace = 'cache';
+  dbg(namespace, 'GET /cache');
 
-app.post('/generate-map', async (req, res) => {
-  if (!renderer) {
-    return res.status(501).json({ error: 'Legacy renderer not available. Use /vector-map instead.' });
-  }
   try {
-    const result = await renderer.generateMap(req.body);
-    res.json(result);
+    const stats = tileCache.getStats();
+    sendSuccess(res, namespace, stats, startTime);
   } catch (err) {
-    console.error('[generate-map] Error:', err);
-    res.status(500).json({ error: err.message });
+    sendError(res, namespace, err);
   }
 });
 
-// ── POST /finalize (legacy) ────────────────────────────────────────────────────
+// ── Global Error Fallback ──────────────────────────────────────────────────────
 
-app.post('/finalize', async (req, res) => {
-  if (!renderer) {
-    return res.status(501).json({ error: 'Legacy renderer not available.' });
-  }
-  try {
-    const result = await renderer.finalize(req.body);
-    res.json(result);
-  } catch (err) {
-    console.error('[finalize] Error:', err);
-    res.status(500).json({ error: err.message });
-  }
+app.use((err, req, res, next) => {
+  sendError(res, 'server', err, 500);
 });
 
-// ── GET /health ────────────────────────────────────────────────────────────────
+// ── Boot sequence ──────────────────────────────────────────────────────────────
 
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    version: '2.0.0-phase1',
-    endpoints: ['/vector-map', '/search', '/city-boundary', '/generate-map', '/finalize'],
-  });
-});
-
-// ── Start ──────────────────────────────────────────────────────────────────────
-
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`[Masar v2] Server running on port ${PORT}`);
+  dbg('server', `Masar v3 Core API Online — Listening on Port ${PORT}`);
 });
