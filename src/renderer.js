@@ -1,70 +1,41 @@
-// renderer.js — Production-Grade GEOlayers Architecture
+// renderer.js — GEOlayers Architecture (Full World, No Labels)
 const { createCanvas } = require("canvas");
 const { geoMercator, geoEquirectangular, geoPath, geoGraticule } = require("d3-geo");
 const sharp = require("sharp");
 const fetch = require("node-fetch");
 
-// ── 1. قوالب خوادم الخرائط الاحترافية لجميع الأساليب ─────────────────
+// 1. قوالب خوادم الخرائط (بدون نصوص - No Labels) لضمان فصل الطبقات
 const TILE_PROVIDERS = {
-  "dark":           "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-  "dark-pro":       "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-  "light":          "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-  "positron":       "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-  "liberty":        "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-  "voyager":        "https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png",
-  "political":      "https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png",
-  "topo":           "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
-  "terrain":        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}",
-  "vintage-atlas":  "https://server.arcgisonline.com/ArcGIS/rest/services/Specialty/DeLorme_World_Base_Map/MapServer/tile/{z}/{y}/{x}",
+  "dark":           "https://basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}.png",
+  "dark-pro":       "https://basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}.png",
+  "light":          "https://basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}.png",
+  "positron":       "https://basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}.png",
+  "liberty":        "https://basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}.png",
+  "voyager":        "https://basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}.png",
+  "political":      "https://basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}.png",
+  "topo":           "https://server.arcgisonline.com/ArcGIS/rest/services/World_Physical_Map/MapServer/tile/{z}/{y}/{x}",
+  "terrain":        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Physical_Map/MapServer/tile/{z}/{y}/{x}",
   "satellite":      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
   "satellite-film": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 };
 
-// إعدادات الفلتر الجمالي للـ D3 Fallback فقط
 const STYLES_CONFIG = {
-  "dark": { ocean:"#080c14", land:"#141c28", border:"#2a3550", vignette:true, vignetteColor:"#000000", vignetteStrength:0.5, grain:true, grainStrength:0.03 },
-  "vintage-atlas": { vignette:true, vignetteColor:"#3a2010", vignetteStrength:0.4, grain:true, grainStrength:0.04 },
+  "dark": { ocean:"#080c14", land:"#141c28", border:"#2a3550" },
   "satellite-film": { vignette:true, vignetteColor:"#000000", vignetteStrength:0.6, grain:true, grainStrength:0.02 }
 };
 
-// ── 2. بناء الإسقاط الهندسي بدون Padding لضمان التطابق 100% ─────────
+// 2. بناء الإسقاط الهندسي الكامل لخريطة العالم كـ "مربع"
 function buildProjection(bbox, width, height) {
-  const proj = geoMercator()
+  // بما أننا نطلب خريطة العالم الكاملة، لا نحتاج إلى قص fitExtent
+  return geoMercator()
     .scale(width / (2 * Math.PI))
     .translate([width / 2, height / 2]);
-
-  const spanLon = (bbox.maxLon || 180) - (bbox.minLon || -180);
-  const spanLat = (bbox.maxLat || 85)  - (bbox.minLat || -85);
-  if (spanLon > 300 || spanLat > 150) return proj;
-
-  // إصلاح خطأ الـ Padding الحرج: يجب أن يكون الهامش 0 ليتطابق مع عملية قص الصور الـ Tiles
-  const pad = 0; 
-  proj.fitExtent(
-    [[pad, pad], [width - pad, height - pad]],
-    {
-      type: "Feature",
-      geometry: {
-        type: "Polygon",
-        coordinates: [[
-          [bbox.minLon, bbox.minLat],
-          [bbox.maxLon, bbox.minLat],
-          [bbox.maxLon, bbox.maxLat],
-          [bbox.minLon, bbox.maxLat],
-          [bbox.minLon, bbox.minLat],
-        ]]
-      }
-    }
-  );
-  return proj;
 }
 
 function buildEquirectProjection(width, height) {
-  return geoEquirectangular()
-    .scale(width / (2 * Math.PI))
-    .translate([width / 2, height / 2]);
+  return geoEquirectangular().scale(width / (2 * Math.PI)).translate([width / 2, height / 2]);
 }
 
-// ── 3. جلب الـ Tiles وحفظها في الـ Cache تسريعاً للأداء ─────────────────
 const tileCache = {};
 async function fetchTileByUrl(url, timeout = 8000) {
   if (tileCache[url]) return tileCache[url];
@@ -77,7 +48,6 @@ async function fetchTileByUrl(url, timeout = 8000) {
   } catch(e) { return null; }
 }
 
-// معادلات التحويل الرياضي الجغرافي من إحداثيات إلى مقياس الـ Tiles الـ Mercator
 function lonToTileX(lon, z) { return Math.floor((lon + 180) / 360 * Math.pow(2, z)); }
 function latToTileY(lat, z) { const r = lat * Math.PI / 180; return Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * Math.pow(2, z)); }
 function tileXToLon(x, z) { return x / Math.pow(2, z) * 360 - 180; }
@@ -85,27 +55,21 @@ function tileYToLat(y, z) { const n = Math.PI - 2 * Math.PI * y / Math.pow(2, z)
 
 function calcZoom(bbox) { 
   const r = Math.max(bbox.maxLon - bbox.minLon, bbox.maxLat - bbox.minLat); 
-  if (r > 80) return 3; if (r > 40) return 4; if (r > 20) return 5; 
-  if (r > 10) return 6; if (r > 5)  return 7; if (r > 2)  return 8; 
-  return 9; 
+  if (r > 300) return 3; // الزووم المثالي لخريطة العالم الكاملة 2048x2048
+  if (r > 80) return 4; if (r > 40) return 5; if (r > 20) return 6; 
+  if (r > 10) return 7; if (r > 5)  return 8; if (r > 2)  return 9; 
+  return 10; 
 }
 
-// ── 4. المحرك الديناميكي لتجميع الـ Tiles (Universal Stitcher) ───────
 async function stitchMapTiles(bbox, width, height, styleKey) {
   const template = TILE_PROVIDERS[styleKey] || TILE_PROVIDERS["dark"];
   const zoom = calcZoom(bbox);
   
-  const x0 = lonToTileX(bbox.minLon, zoom);
-  const x1 = lonToTileX(bbox.maxLon, zoom);
-  const y0 = latToTileY(bbox.maxLat, zoom);
-  const y1 = latToTileY(bbox.minLat, zoom);
+  const x0 = lonToTileX(bbox.minLon, zoom), x1 = lonToTileX(bbox.maxLon, zoom);
+  const y0 = latToTileY(bbox.maxLat, zoom), y1 = latToTileY(bbox.minLat, zoom);
+  const TILE = 256, tw = x1 - x0 + 1, th = y1 - y0 + 1;
 
-  const TILE = 256;
-  const tw = x1 - x0 + 1;
-  const th = y1 - y0 + 1;
-
-  // حماية السيرفر من الطلبات الضخمة جداً في الـ Base Map
-  if (tw > 12 || th > 12) return null;
+  if (tw > 16 || th > 16) return null;
 
   const canvas = createCanvas(tw * TILE, th * TILE);
   const ctx = canvas.getContext("2d");
@@ -115,7 +79,6 @@ async function stitchMapTiles(bbox, width, height, styleKey) {
   for (let ty = y0; ty <= y1; ty++) {
     for (let tx = x0; tx <= x1; tx++) {
       tasks.push((async (tx, ty) => {
-        // استبدال الرموز الرابطة في قالب الـ URL
         const tileUrl = template.replace("{z}", zoom).replace("{x}", tx).replace("{y}", ty);
         const buf = await fetchTileByUrl(tileUrl);
         if (!buf) return;
@@ -133,33 +96,22 @@ async function stitchMapTiles(bbox, width, height, styleKey) {
   await Promise.all(tasks);
   if (loaded === 0) return null;
 
-  // الحسابات الرياضية الدقيقة لقص أطراف الصورة الزائدة وتكبيرها للحجم المطلوب 8K
   const tLonR = tileXToLon(x1 + 1, zoom) - tileXToLon(x0, zoom);
   const tLatR = tileYToLat(y0, zoom) - tileYToLat(y1 + 1, zoom);
-  
   const cX = Math.max(0, Math.floor((bbox.minLon - tileXToLon(x0, zoom)) / tLonR * tw * TILE));
   const cY = Math.max(0, Math.floor((tileYToLat(y0, zoom) - bbox.maxLat) / tLatR * th * TILE));
   const cW = Math.max(1, Math.floor((bbox.maxLon - bbox.minLon) / tLonR * tw * TILE));
   const cH = Math.max(1, Math.floor((bbox.maxLat - bbox.minLat) / tLatR * th * TILE));
 
-  // معالجة الصورة عبر Sharp لقصها ووضع الـ Resolution المطلوب لـ AE
-  return sharp(canvas.toBuffer("image/png"))
-    .extract({ left: cX, top: cY, width: cW, height: cH })
-    .resize(width, height)
-    .png()
-    .toBuffer();
+  return sharp(canvas.toBuffer("image/png")).extract({ left: cX, top: cY, width: cW, height: cH }).resize(width, height).png().toBuffer();
 }
 
-// ── 5. رندر الفولباك (D3 Fallback) في حال انقطاع الإنترنت ───────────
 async function renderD3Fallback(world, width, height, styleKey, projection) {
   const cfg = STYLES_CONFIG[styleKey] || STYLES_CONFIG["dark"];
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext("2d");
   const pathFn = geoPath(projection, ctx);
-
-  ctx.fillStyle = cfg.ocean || "#080c14";
-  ctx.fillRect(0, 0, width, height);
-
+  ctx.fillStyle = cfg.ocean || "#080c14"; ctx.fillRect(0, 0, width, height);
   for (const f of world.features) {
     ctx.beginPath(); pathFn(f);
     ctx.fillStyle = cfg.land || "#141c28"; ctx.fill();
@@ -168,47 +120,16 @@ async function renderD3Fallback(world, width, height, styleKey, projection) {
   return canvas.toBuffer("image/png");
 }
 
-// الفلاتر التجميلية الإضافية (Vignette & Grain)
-async function applyVignette(buf, W, H, color, strength) {
-  const canvas = createCanvas(W, H), ctx = canvas.getContext("2d");
-  const grad = ctx.createRadialGradient(W/2, H/2, H*0.25, W/2, H/2, H*0.9);
-  grad.addColorStop(0, "transparent");
-  grad.addColorStop(1, color + Math.floor(strength*255).toString(16).padStart(2, "0"));
-  ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
-  return sharp(buf).composite([{ input: canvas.toBuffer("image/png"), blend: "over" }]).png().toBuffer();
-}
-
-async function applyGrain(buf, W, H, strength) {
-  const canvas = createCanvas(W, H), ctx = canvas.getContext("2d"), id = ctx.createImageData(W, H);
-  for(let i=0; i<id.data.length; i+=4){ const v = Math.random()>0.5 ? 255 : 0; id.data[i]=id.data[i+1]=id.data[i+2]=v; id.data[i+3]=Math.floor(strength*60); }
-  ctx.putImageData(id, 0, 0);
-  return sharp(buf).composite([{ input: canvas.toBuffer("image/png"), blend: "overlay" }]).png().toBuffer();
-}
-
-// ── 6. المدخل الرئيسي لتوليد الخريطة الأساسية ────────────────────────
 async function renderBaseMap(world, bbox, options={}) {
-  const { width=1920, height=960, style="dark", projection: existingProj } = options;
+  const { width=2048, height=2048, style="dark", projection: existingProj } = options;
   const projection = existingProj || buildProjection(bbox, width, height);
-
-  // جلب الخرائط الشبكية المفصلة من خوادم الإنترنت أولاً لجميع الأساليب
   try {
     const tileBuf = await stitchMapTiles(bbox, width, height, style);
-    if (tileBuf) {
-      const cfg = STYLES_CONFIG[style] || {};
-      let result = tileBuf;
-      if (cfg.vignette) result = await applyVignette(result, width, height, cfg.vignetteColor || "#000000", cfg.vignetteStrength || 0.5);
-      if (cfg.grain)    result = await applyGrain(result, width, height, cfg.grainStrength || 0.03);
-      return result;
-    }
-  } catch(e) { 
-    console.log("[Renderer] Universal Stitcher Fallback to D3:", e.message); 
-  }
-
-  // إذا فشل الاتصال بالإنترنت، يتم استخدام خرائط الـ D3 الصماء كخط دفاع أخير
+    if (tileBuf) return tileBuf;
+  } catch(e) { console.log("[Renderer] Fallback to D3"); }
   return renderD3Fallback(world, width, height, style, projection);
 }
 
-// ── 7. محول الإحداثيات للفيكتور والـ Rings ──────────────────────────
 function geometryToPixels(geometry, projection, compW, compH) {
   const rings = [];
   const toAE = ([lon, lat]) => { const [x, y] = projection([lon, lat]); return [x - compW/2, y - compH/2]; };
@@ -218,7 +139,6 @@ function geometryToPixels(geometry, projection, compW, compH) {
   else if (geometry.type === "MultiLineString") for(const l of geometry.coordinates) rings.push(l.map(toAE));
   return rings;
 }
-
 function pointToPixel(geometry, projection) { return projection(geometry.coordinates); }
 function getStylesList() { return Object.keys(TILE_PROVIDERS).map(key => ({ key, name: key })); }
 
