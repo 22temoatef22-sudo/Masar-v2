@@ -10,8 +10,8 @@ const fetch = require('node-fetch');
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-// ✅ تم تصحيح الرابط ليشير إلى ملف style.json مباشرة
-const STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty/style.json';
+// ✅ تم إرجاع الرابط لشكله الأصلي الصحيح والمدعوم من OpenFreeMap
+const STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
 const ALLOWED_LAYERS = ['boundary', 'water', 'waterway'];
 const MAX_TILES = 64; 
 
@@ -69,7 +69,7 @@ async function discoverTileURL() {
 
   console.log('[mvt-decoder] Fetching style.json from', STYLE_URL);
   const res = await fetch(STYLE_URL);
-  if (!res.ok) throw new Error(`Failed to fetch style.json: ${res.status}`);
+  if (!res.ok) throw new Error(`Failed to fetch style: ${res.status}`);
 
   const style = await res.json();
   const sources = style.sources || {};
@@ -148,7 +148,7 @@ async function fetchAndDecodeTile(tileURL, x, y, z) {
 
   const buffer = await res.arrayBuffer();
   
-  // ✅ حل مشكلة Protobuf is not a constructor
+  // ✅ الإصلاح البرمجي لمشكلة Protobuf is not a constructor
   const PbfConstructor = Protobuf.default || Protobuf;
   const pbf = new PbfConstructor(new Uint8Array(buffer));
   const vt = new VectorTile(pbf);
