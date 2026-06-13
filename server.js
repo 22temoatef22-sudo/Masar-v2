@@ -95,6 +95,46 @@ app.post("/generate-map", async (req, res) => {
   }
 });
 
+// ── Geometry only — no image rendering ───────────────────────
+// Used by canvas screenshot strategy: panel captures its own map,
+// server only converts GeoJSON → pixel coordinates
+app.post("/geometry-only", async (req, res) => {
+  try {
+    const { bbox, layers=[], style="dark", width=1920, height=960 } = req.body;
+
+    const rawBbox = (bbox && bbox.minLon !== undefined)
+      ? bbox
+      : { minLon:-180, maxLon:180, minLat:-85, maxLat:85 };
+
+    console.log(`[Masar v4] geometry-only ${width}x${height} ${layers.length} layers`);
+
+    // Build projection fitted to bbox — same as renderer
+    const projection = buildProjection(rawBbox, width, height);
+
+    // Convert geometries to pixel coords
+    const pixelLayers = layers.map(layer => {
+      const result = {
+        id:layer.id, name:layer.name, type:layer.type,
+        mode:layer.mode||"shape", color:layer.color||"#f97316"
+      };
+      if (!layer.geometry) return result;
+      if (layer.geometry.type==="Point" || layer.mode==="point") {
+        const [x,y] = pointToPixel(layer.geometry, projection);
+        result.pixelX=x; result.pixelY=y; result.geometryType="point";
+      } else {
+        result.rings = geometryToPixels(layer.geometry, projection, width, height);
+        result.geometryType = layer.geometry.type.includes("Line") ? "line" : "polygon";
+      }
+      return result;
+    });
+
+    res.json({ success:true, layers:pixelLayers });
+  } catch(e) {
+    console.error("[Masar v4] geometry-only error:", e.message);
+    res.status(500).json({ error:e.message });
+  }
+});
+
 // Finalize — fetch high-res tiles per zoom level
 const tileCache = {};
 async function fetchTile(url) {
