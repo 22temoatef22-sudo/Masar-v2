@@ -147,4 +147,124 @@ async function decodeMVT(options) {
   try {
     nativeStyleId = themes.resolveProviderStyle(options.provider, options.style);
   } catch (err) {
-    native
+    nativeStyleId = options.style;
+  }
+
+  const downloadResult = await downloader.downloadTiles({
+    type: 'vector',
+    ofmStyleId: nativeStyleId,
+    tiles: tileList,
+    concurrency: concurrency,
+    signal: options.signal
+  });
+
+  // 3. Decoding Statistics Setup
+  const stats = {
+    tileCount: tileList.length,
+    decodedTiles: 0,
+    featureCount: 0,
+    waterFeatures: 0,
+    boundaryFeatures: 0,
+    waterwayFeatures: 0,
+    cacheHits: downloadResult.stats.cacheHits,
+    cacheMisses: downloadResult.stats.fetched,
+    durationMs: 0
+  };
+
+  const allFeatures = [];
+
+  // 4. Build Decoding Tasks
+  const decodingTasks = downloadResult.tiles.map((t) => async () => {
+    if (!t.buffer || t.buffer.length === 0) return null;
+
+    // Yield to the Node.js event loop before heavy CPU parsing
+    await new Promise(resolve => setImmediate(resolve));
+
+    if (options.signal && options.signal.aborted) {
+      throw new Error('[mvt-decoder] Cancelled');
+    }
+
+    try {
+      const pbf = new Pbf(t.buffer);
+      const vTile = new VectorTile(pbf);
+      let tileFeatureCount = 0;
+
+      for (let layerName in vTile.layers) {
+        const layerClass = classifyLayer(layerName);
+        if (layerClass === 'unknown') continue;
+
+        const layer = vTile.layers[layerName];
+
+        for (let j = 0; j < layer.length; j++) {
+          let feature;
+          let geojson;
+
+          try {
+            feature = layer.feature(j);
+            geojson = feature.toGeoJSON(t.x, t.y, t.z);
+          } catch (err) {
+            continue; // Skip corrupted individual features
+          }
+
+          if (!isValidGeometry(geojson.geometry)) continue;
+
+          // Hydrate required metadata
+          geojson.properties = geojson.properties || {};
+          geojson.properties.layer = layerClass; // Standardized output layer
+          geojson.properties._sourceLayer = layerName;
+          geojson.properties._tileX = t.x;
+          geojson.properties._tileY = t.y;
+          geojson.properties._zoom = t.z;
+          geojson.properties._provider = options.provider;
+          geojson.properties._style = nativeStyleId;
+
+          allFeatures.push(geojson);
+          tileFeatureCount++;
+
+          // Safety Memory Limit
+          if (allFeatures.length > MAX_FEATURES) {
+            throw new Error('[mvt-decoder] Feature limit exceeded');
+          }
+
+          // Update stats
+          if (layerClass === 'water') stats.waterFeatures++;
+          else if (layerClass === 'waterway') stats.waterwayFeatures++;
+          else if (layerClass === 'boundary') stats.boundaryFeatures++;
+        }
+      }
+
+      if (tileFeatureCount > 0) {
+        stats.decodedTiles++;
+        stats.featureCount += tileFeatureCount;
+      }
+    } catch (err) {
+      dbg(`Failed to decode tile ${t.z}/${t.x}/${t.y}: ${err.message}`);
+    }
+  });
+
+  // 5. Execute CPU-Bound Pool
+  await processInPool(decodingTasks, concurrency, options.signal);
+
+  stats.durationMs = Date.now() - startTime;
+  dbg(`Decoded ${stats.decodedTiles} tiles -> ${stats.featureCount} features in ${stats.durationMs}ms`);
+  dbg(`Hits: ${stats.cacheHits}, Misses: ${stats.cacheMisses}`);
+
+  return {
+    type: 'FeatureCollection',
+    features: allFeatures,
+    metadata: {
+      provider: options.provider,
+      style: options.style,
+      zoom: options.zoom,
+      bbox: options.bbox,
+      generatedAt: new Date().toISOString()
+    },
+    stats: stats
+  };
+}
+
+module.exports = {
+  decodeMVT,
+  _classifyLayer: classifyLayer,
+  _isValidGeometry: isValidGeometry
+};
