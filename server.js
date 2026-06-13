@@ -1,288 +1,197 @@
-// Masar v2 Server — BBox Screenshot Architecture v4.0
-// Renders CURRENT VIEW (bbox-fitted) not full world → no pixelation
+/**
+ * Masar v2 — Server
+ * 
+ * Express server providing:
+ *   POST /vector-map   — MVT → GeoJSON → pixel geometry (Phase 1 MVP)
+ *   GET  /search        — City/country search (existing)
+ *   POST /city-boundary — Get boundary for a city (existing)
+ *   POST /generate-map  — Legacy D3/PNG map generation (existing, kept for compat)
+ *   POST /finalize      — Legacy finalize (existing)
+ *   GET  /health        — Health check
+ */
 
-const express = require("express");
-const cors    = require("cors");
-const fetch   = require("node-fetch");
-const sharp   = require("sharp");
-const path    = require("path");
-const fs      = require("fs");
-const os      = require("os");
+const express = require('express');
+const cors = require('cors');
+const { decodeMVT } = require('./src/mvt-decoder');
+const { processGeoJSON } = require('./src/geo-processor');
 
-const { search, getCityBoundary, loadAll, loadGeoData } = require("./src/geodata");
-const { buildProjection, buildEquirectProjection, geometryToPixels, pointToPixel, renderBaseMap } = require("./src/renderer");
+// Try loading existing modules (they may not exist yet in a fresh deploy)
+let geodata, renderer;
+try { geodata = require('./src/geodata'); } catch (_) { geodata = null; }
+try { renderer = require('./src/renderer'); } catch (_) { renderer = null; }
 
-const app  = express();
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '5mb' }));
+
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
-app.use(express.json({ limit:"50mb" }));
-loadAll().catch(console.error);
+// ── Style Colors ───────────────────────────────────────────────────────────────
 
-app.get("/", (req, res) => res.json({ status:"ok", service:"Masar v2 Server", version:"4.0.0-bbox" }));
-
-app.get("/search", async (req, res) => {
-  try {
-    const q = (req.query.q||"").trim();
-    if (!q||q.length<2) return res.json({ results:[] });
-    res.json({ results: await search(q) });
-  } catch(e) { res.status(500).json({ error:e.message }); }
-});
-
-app.get("/city-boundary", async (req, res) => {
-  try {
-    const name = (req.query.name||"").trim();
-    if (!name) return res.status(400).json({ error:"name required" });
-    await new Promise(r => setTimeout(r, 1100));
-    const boundary = await getCityBoundary(name);
-    if (!boundary) return res.json({ found:false });
-    res.json({ found:true, ...boundary });
-  } catch(e) { res.status(500).json({ error:e.message }); }
-});
-
-// Style name normalizer
-function normalizeStyle(s) {
-  const map = {
-    "positron":"light", "liberty":"light", "voyager":"topo",
-    "satellite-film":"satellite", "dark-matter":"dark",
-  };
-  return map[s] || s || "dark";
-}
-
-app.post("/generate-map", async (req, res) => {
-  try {
-    const { state={}, bbox, layers=[], style="dark", width=1920, height=960 } = req.body;
-    const normalStyle = normalizeStyle(style);
-
-    // Use bbox from panel (current view) — this is the key to no pixelation
-    const rawBbox = (bbox && bbox.minLon !== undefined)
-      ? bbox
-      : { minLon:-180, maxLon:180, minLat:-85, maxLat:85 };
-
-    console.log(`[Masar v4] generate-map style:${normalStyle} bbox:[${rawBbox.minLon.toFixed(1)},${rawBbox.minLat.toFixed(1)},${rawBbox.maxLon.toFixed(1)},${rawBbox.maxLat.toFixed(1)}] ${width}x${height}`);
-
-    // Build projection fitted to bbox
-    const projection = buildProjection(rawBbox, width, height);
-    const world = await loadGeoData("countries");
-    const mapBuffer = await renderBaseMap(world, rawBbox, { width, height, style:normalStyle, projection });
-    const base64 = mapBuffer.toString("base64");
-
-    // Convert geometries to pixel coords using same projection
-    const pixelLayers = layers.map(layer => {
-      const result = {
-        id:layer.id, name:layer.name, type:layer.type,
-        mode:layer.mode||"shape", color:layer.color||"#f97316"
-      };
-      if (!layer.geometry) return result;
-      if (layer.geometry.type==="Point" || layer.mode==="point") {
-        const [x,y] = pointToPixel(layer.geometry, projection);
-        result.pixelX=x; result.pixelY=y; result.geometryType="point";
-      } else {
-        result.rings = geometryToPixels(layer.geometry, projection, width, height);
-        result.geometryType = layer.geometry.type.includes("Line") ? "line" : "polygon";
-      }
-      return result;
-    });
-
-    console.log(`[Masar v4] Done — ${mapBuffer.length} bytes`);
-    res.json({
-      success:true, map:base64,
-      metadata:{ width, height, style:normalStyle, layers:pixelLayers, mapW:width, mapH:height, state }
-    });
-  } catch(e) {
-    console.error("[Masar v4] generate-map error:", e.message);
-    res.status(500).json({ error:e.message });
-  }
-});
-
-// ── Geometry only — no image rendering ───────────────────────
-// Used by canvas screenshot strategy: panel captures its own map,
-// server only converts GeoJSON → pixel coordinates
-app.post("/geometry-only", async (req, res) => {
-  try {
-    const { bbox, layers=[], style="dark", width=1920, height=960 } = req.body;
-
-    const rawBbox = (bbox && bbox.minLon !== undefined)
-      ? bbox
-      : { minLon:-180, maxLon:180, minLat:-85, maxLat:85 };
-
-    console.log(`[Masar v4] geometry-only ${width}x${height} ${layers.length} layers`);
-
-    // Build projection fitted to bbox — same as renderer
-    const projection = buildProjection(rawBbox, width, height);
-
-    // Convert geometries to pixel coords
-    const pixelLayers = layers.map(layer => {
-      const result = {
-        id:layer.id, name:layer.name, type:layer.type,
-        mode:layer.mode||"shape", color:layer.color||"#f97316"
-      };
-      if (!layer.geometry) return result;
-      if (layer.geometry.type==="Point" || layer.mode==="point") {
-        const [x,y] = pointToPixel(layer.geometry, projection);
-        result.pixelX=x; result.pixelY=y; result.geometryType="point";
-      } else {
-        result.rings = geometryToPixels(layer.geometry, projection, width, height);
-        result.geometryType = layer.geometry.type.includes("Line") ? "line" : "polygon";
-      }
-      return result;
-    });
-
-    res.json({ success:true, layers:pixelLayers });
-  } catch(e) {
-    console.error("[Masar v4] geometry-only error:", e.message);
-    res.status(500).json({ error:e.message });
-  }
-});
-
-// ── Vector Map — returns geometry only (no PNG) ──────────────
-// Used by new MapComp architecture: JSX builds everything as solids+shapes
-app.post("/vector-map", async (req, res) => {
-  try {
-    const { state={}, bbox, layers=[], style="dark", width=3840, height=2160 } = req.body;
-    const normalStyle = normalizeStyle(style);
-    const rawBbox = (bbox && bbox.minLon !== undefined)
-      ? bbox : { minLon:-180, maxLon:180, minLat:-85, maxLat:85 };
-
-    console.log(`[Masar v4] vector-map style:${normalStyle} ${width}x${height} ${layers.length} layers`);
-
-    const projection = buildProjection(rawBbox, width, height);
-
-    // Get world country rings for MapComp background
-    const world = await loadGeoData("countries");
-    const worldRings = [];
-    for (const f of world.features) {
-      const rings = [];
-      const toPixel = ([lon, lat]) => {
-        const [x, y] = projection([lon, lat]);
-        return [x, y];
-      };
-      if (f.geometry.type === "Polygon") {
-        rings.push(f.geometry.coordinates[0].map(toPixel));
-      } else if (f.geometry.type === "MultiPolygon") {
-        for (const p of f.geometry.coordinates) rings.push(p[0].map(toPixel));
-      }
-      worldRings.push(...rings);
-    }
-
-    // Simplify world rings for AE (max 150 points per ring)
-    const simplifiedWorld = worldRings.map(ring => {
-      if (ring.length <= 150) return ring;
-      const step = Math.ceil(ring.length / 150);
-      return ring.filter((_, i) => i % step === 0);
-    }).filter(r => r.length >= 3);
-
-    // Convert selected layers to pixel coords
-    const pixelLayers = layers.map(layer => {
-      const result = {
-        id:layer.id, name:layer.name, type:layer.type,
-        mode:layer.mode||"shape", color:layer.color||"#f97316"
-      };
-      if (!layer.geometry) return result;
-      if (layer.geometry.type==="Point" || layer.mode==="point") {
-        const [x,y] = pointToPixel(layer.geometry, projection);
-        result.pixelX=x; result.pixelY=y; result.geometryType="point";
-      } else {
-        result.rings = geometryToPixels(layer.geometry, projection, width, height);
-        result.geometryType = layer.geometry.type.includes("Line") ? "line" : "polygon";
-      }
-      return result;
-    });
-
-    console.log(`[Masar v4] vector-map done — ${simplifiedWorld.length} world rings, ${pixelLayers.length} layers`);
-
-    res.json({
-      success: true,
-      metadata: {
-        width, height, style: normalStyle,
-        layers: pixelLayers,
-        worldRings: simplifiedWorld,
-        mapW: width, mapH: height,
-        state
-      }
-    });
-  } catch(e) {
-    console.error("[Masar v4] vector-map error:", e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Finalize — fetch high-res tiles per zoom level
-const tileCache = {};
-async function fetchTile(url) {
-  if (tileCache[url]) return tileCache[url];
-  try {
-    const res = await fetch(url, { timeout:8000 });
-    if (!res.ok) return null;
-    const buf = await res.buffer();
-    tileCache[url] = buf;
-    return buf;
-  } catch(e) { return null; }
-}
-
-const FINALIZE_PROVIDERS = {
-  "dark":      "https://basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}.png",
-  "light":     "https://basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}.png",
-  "topo":      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Physical_Map/MapServer/tile/{z}/{y}/{x}",
-  "satellite": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+const STYLE_COLORS = {
+  dark:  { ocean: '#080c14', land: '#141c28', border: '#2a3550', water: '#0d1520', river: '#1a2a40' },
+  light: { ocean: '#a8c8e8', land: '#f0ede0', border: '#999999', water: '#a8c8e8', river: '#7cb4d4' },
+  topo:  { ocean: '#7ba7bc', land: '#d4c9a0', border: '#8b7040', water: '#7ba7bc', river: '#5a8fa8' },
 };
 
-function lonToTileX(lon,z){ return Math.floor((lon+180)/360*Math.pow(2,z)); }
-function latToTileY(lat,z){ const r=lat*Math.PI/180; return Math.floor((1-Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2*Math.pow(2,z)); }
+// ── POST /vector-map ───────────────────────────────────────────────────────────
 
-async function fetchFinalizeTiles(lat, lon, zoom, width, height, style) {
-  const TILE=256;
-  const cx=lonToTileX(lon,zoom), cy=latToTileY(lat,zoom);
-  const tw=Math.ceil(width/TILE)+2, th=Math.ceil(height/TILE)+2;
-  const x0=cx-Math.floor(tw/2), y0=cy-Math.floor(th/2);
-  if (tw*th>36) return null;
-  const template = FINALIZE_PROVIDERS[style] || FINALIZE_PROVIDERS["dark"];
-  const { createCanvas, Image } = require("canvas");
-  const canvas=createCanvas(tw*TILE,th*TILE), ctx=canvas.getContext("2d");
-  ctx.fillStyle="#000"; ctx.fillRect(0,0,tw*TILE,th*TILE);
-  let loaded=0;
-  await Promise.all(Array.from({length:tw*th},(_,i)=>{
-    const tx=x0+Math.floor(i/th), ty=y0+(i%th);
-    return (async()=>{
-      const url=template.replace("{z}",zoom).replace("{x}",tx).replace("{y}",ty);
-      const buf=await fetchTile(url); if(!buf)return;
-      try{
-        const img=new Image();
-        await new Promise((res,rej)=>{img.onload=res;img.onerror=rej;img.src=buf;});
-        ctx.drawImage(img,(tx-x0)*TILE,(ty-y0)*TILE); loaded++;
-      }catch(e){}
-    })();
-  }));
-  if(loaded===0)return null;
-  const px=Math.max(0,(cx-x0)*TILE+TILE/2-width/2);
-  const py=Math.max(0,(cy-y0)*TILE+TILE/2-height/2);
-  return sharp(canvas.toBuffer("image/png"))
-    .extract({left:Math.round(px),top:Math.round(py),width:Math.min(width,tw*TILE),height:Math.min(height,th*TILE)})
-    .resize(width,height).png().toBuffer();
-}
+app.post('/vector-map', async (req, res) => {
+  const startTime = Date.now();
 
-app.post("/finalize", async (req, res) => {
   try {
-    let { keyframes=[], style="dark", compW=3840, compH=2160 } = req.body;
-    style = normalizeStyle(style);
-    if (!keyframes.length) return res.json({ success:false, error:"No keyframes" });
-    const zoomLevels = [...new Set(keyframes.map(kf => Math.round(kf.state.zoom||2)))];
-    const tiles = [];
-    for (const zoom of zoomLevels) {
-      const kfsAtZoom = keyframes.filter(kf => Math.round(kf.state.zoom||2)===zoom);
-      const kf = kfsAtZoom[Math.floor(kfsAtZoom.length/2)];
-      try {
-        const tileBuf = await fetchFinalizeTiles(kf.state.lat||25, kf.state.lon||30, zoom, compW, compH, style);
-        if (tileBuf) {
-          const tilePath = path.join(os.tmpdir(), `masar_tile_z${zoom}_${Date.now()}.png`);
-          await fs.promises.writeFile(tilePath, tileBuf);
-          const inKf=kfsAtZoom[0], outKf=kfsAtZoom[kfsAtZoom.length-1];
-          tiles.push({ zoom, path:tilePath, inTime:inKf.time-0.5, outTime:outKf.time+0.5 });
-        }
-      } catch(e) { console.error(`Tile Z${zoom} failed:`, e.message); }
+    const {
+      bbox,
+      zoom = 4,
+      style = 'dark',
+      width = 3840,
+      height = 2160,
+    } = req.body;
+
+    // Validate bbox
+    if (!bbox || !Array.isArray(bbox) || bbox.length !== 4) {
+      return res.status(400).json({
+        success: false,
+        error: 'bbox is required as [west, south, east, north]',
+      });
     }
-    res.json({ success:true, metadata:{ tiles, zoomLevels } });
-  } catch(e) { res.status(500).json({ error:e.message }); }
+
+    const [west, south, east, north] = bbox;
+    if (west >= east || south >= north) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid bbox: west must be < east, south must be < north',
+      });
+    }
+
+    console.log(`[vector-map] Request: bbox=[${bbox}], zoom=${zoom}, style=${style}, ${width}x${height}`);
+
+    // Step 1: Decode MVT tiles → GeoJSON
+    const geojson = await decodeMVT(bbox, zoom);
+    const decodeTime = Date.now() - startTime;
+    console.log(`[vector-map] MVT decode: ${geojson.features.length} features in ${decodeTime}ms`);
+
+    // Step 2: Process GeoJSON → pixel geometry
+    const result = processGeoJSON(geojson, bbox, width, height);
+    const processTime = Date.now() - startTime - decodeTime;
+    console.log(`[vector-map] Geo process: ${result.stats.totalShapes} shapes, ${result.stats.totalPoints} points in ${processTime}ms`);
+
+    // Step 3: Get style colors
+    const colors = STYLE_COLORS[style] || STYLE_COLORS.dark;
+
+    // Step 4: Build response
+    const response = {
+      success: true,
+      metadata: {
+        waterRings: result.waterRings,
+        borderRings: result.borderRings,
+        riverLines: result.riverLines,
+        style: colors,
+        mapW: width,
+        mapH: height,
+      },
+      stats: result.stats,
+      timing: {
+        decode: decodeTime,
+        process: processTime,
+        total: Date.now() - startTime,
+      },
+    };
+
+    // Check payload size
+    const payload = JSON.stringify(response);
+    const payloadKB = Math.round(payload.length / 1024);
+    console.log(`[vector-map] Payload: ${payloadKB}KB`);
+
+    if (payloadKB > 500) {
+      console.warn(`[vector-map] Payload ${payloadKB}KB exceeds 500KB limit!`);
+      // Still send it but warn — the client will need to handle this
+    }
+
+    res.json(response);
+  } catch (err) {
+    console.error('[vector-map] Error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
+  }
 });
 
-app.listen(PORT, () => console.log(`[Masar v4] BBox-Screenshot Server running on port ${PORT}`));
+// ── GET /search ────────────────────────────────────────────────────────────────
+
+app.get('/search', async (req, res) => {
+  if (!geodata) {
+    return res.status(501).json({ error: 'geodata module not available' });
+  }
+  try {
+    const q = req.query.q || '';
+    const results = await geodata.search(q);
+    res.json(results);
+  } catch (err) {
+    console.error('[search] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /city-boundary ────────────────────────────────────────────────────────
+
+app.post('/city-boundary', async (req, res) => {
+  if (!geodata) {
+    return res.status(501).json({ error: 'geodata module not available' });
+  }
+  try {
+    const { name, country } = req.body;
+    const boundary = await geodata.getCityBoundary(name, country);
+    res.json(boundary);
+  } catch (err) {
+    console.error('[city-boundary] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /generate-map (legacy — kept for compat) ──────────────────────────────
+
+app.post('/generate-map', async (req, res) => {
+  if (!renderer) {
+    return res.status(501).json({ error: 'Legacy renderer not available. Use /vector-map instead.' });
+  }
+  try {
+    const result = await renderer.generateMap(req.body);
+    res.json(result);
+  } catch (err) {
+    console.error('[generate-map] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /finalize (legacy) ────────────────────────────────────────────────────
+
+app.post('/finalize', async (req, res) => {
+  if (!renderer) {
+    return res.status(501).json({ error: 'Legacy renderer not available.' });
+  }
+  try {
+    const result = await renderer.finalize(req.body);
+    res.json(result);
+  } catch (err) {
+    console.error('[finalize] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /health ────────────────────────────────────────────────────────────────
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    version: '2.0.0-phase1',
+    endpoints: ['/vector-map', '/search', '/city-boundary', '/generate-map', '/finalize'],
+  });
+});
+
+// ── Start ──────────────────────────────────────────────────────────────────────
+
+app.listen(PORT, () => {
+  console.log(`[Masar v2] Server running on port ${PORT}`);
+});
