@@ -324,3 +324,156 @@ async function mergeTiles(options) {
       } else {
         opts.tileSize = DEFAULT_TILE_SIZE;
       }
+    } catch (err) {
+      opts.tileSize = DEFAULT_TILE_SIZE;
+    }
+    dbg('auto-detected tile size: ' + opts.tileSize + 'px');
+  }
+
+  // Extended Diagnostics
+  dbg('provider=' + opts.provider);
+  dbg('style=' + opts.style);
+  dbg('tileSize=' + opts.tileSize);
+
+  // ── Step 3: Missing Tile Debug Mode Injection ───────────────────────────────
+
+  if (opts.showMissingTiles && placeholderTargets.length > 0) {
+    var magentaBuffer = await sharp({
+      create: {
+        width: opts.tileSize,
+        height: opts.tileSize,
+        channels: 4,
+        background: { r: 255, g: 0, b: 255, alpha: 1 }
+      }
+    }).png().toBuffer();
+
+    for (var j = 0; j < placeholderTargets.length; j++) {
+      var p = placeholderTargets[j];
+      validTiles.push({ z: p.z, x: p.x, y: p.y, buffer: magentaBuffer });
+    }
+    dbg('injected ' + placeholderTargets.length + ' magenta placeholder tiles');
+  }
+
+  dbg('valid tiles processed: ' + validTiles.length + ', skipped entirely: ' + tilesSkipped);
+
+  checkAbort(opts.signal);
+
+  // ── Step 4: Compute tile grid ───────────────────────────────────────────────
+
+  var grid      = computeGridExtent(validTiles);
+  var mosaicW   = grid.gridW * opts.tileSize;
+  var mosaicH   = grid.gridH * opts.tileSize;
+
+  var megapixels = ((opts.width * opts.height) / 1000000).toFixed(2);
+  
+  dbg('grid: x[' + grid.xMin + '..' + grid.xMax + '] y[' + grid.yMin + '..' + grid.yMax + ']');
+  dbg('mosaic: ' + mosaicW + 'x' + mosaicH + ' (' +
+      Math.round(mosaicW * mosaicH * 4 / (1024 * 1024)) + 'MB RGBA estimate)');
+  dbg('output format: ' + opts.format + ', export megapixels: ' + megapixels + 'MP');
+
+  // ── Step 5: Build composite input list ─────────────────────────────────────
+
+  var compositeInputs = buildCompositeInputs(validTiles, grid, opts.tileSize);
+
+  // ── Step 6: Compute crop rectangle ─────────────────────────────────────────
+
+  var rawCrop  = bboxToPixelRect(opts.bbox, opts.zoom, opts.tileSize, grid.xMin, grid.yMin);
+  var cropRect = clampCropRect(rawCrop, mosaicW, mosaicH);
+
+  dbg('raw crop: ' + rawCrop.left + ',' + rawCrop.top + ' ' + rawCrop.width + 'x' + rawCrop.height);
+  dbg('clamped crop: ' + cropRect.left + ',' + cropRect.top + ' ' + cropRect.width + 'x' + cropRect.height);
+
+  // ── Step 7: Sharp pipeline ──────────────────────────────────────────────────
+
+  var baseDescriptor = {
+    create: {
+      width:      mosaicW,
+      height:     mosaicH,
+      channels:   4,
+      background: {
+        r:     opts.background.r     !== undefined ? opts.background.r     : 0,
+        g:     opts.background.g     !== undefined ? opts.background.g     : 0,
+        b:     opts.background.b     !== undefined ? opts.background.b     : 0,
+        alpha: opts.background.alpha !== undefined ? opts.background.alpha : 0,
+      },
+    },
+  };
+
+  checkAbort(opts.signal);
+  var pipeline = sharp(baseDescriptor);
+
+  checkAbort(opts.signal);
+  pipeline = pipeline.composite(compositeInputs);
+
+  checkAbort(opts.signal);
+  pipeline = pipeline.extract(cropRect);
+
+  checkAbort(opts.signal);
+  pipeline = pipeline.resize(opts.width, opts.height, {
+    fit:    'fill',
+    kernel: RESIZE_KERNEL,
+  });
+
+  checkAbort(opts.signal);
+  pipeline = applyOutputFormat(pipeline, opts.format, opts);
+
+  checkAbort(opts.signal);
+  var outputBuffer = await pipeline.toBuffer();
+  var durationMs   = Date.now() - startTime;
+
+  dbg('output generated: ' + opts.width + 'x' + opts.height + ' ' + opts.format +
+      ' ' + Math.round(outputBuffer.length / 1024) + 'KB in ' + durationMs + 'ms');
+
+  // ── Step 8: Build result ────────────────────────────────────────────────────
+
+  var stats = {
+    tilesMerged:   validTiles.length,
+    tilesSkipped:  tilesSkipped,
+    mosaicWidth:   mosaicW,
+    mosaicHeight:  mosaicH,
+    cropLeft:      cropRect.left,
+    cropTop:       cropRect.top,
+    cropWidth:     cropRect.width,
+    cropHeight:    cropRect.height,
+    outputWidth:   opts.width,
+    outputHeight:  opts.height,
+    durationMs:    durationMs,
+  };
+
+  return {
+    buffer: outputBuffer,
+    width:  opts.width,
+    height: opts.height,
+    format: opts.format,
+    bounds: {
+      west:  opts.bbox[0],
+      south: opts.bbox[1],
+      east:  opts.bbox[2],
+      north: opts.bbox[3],
+    },
+    metadata: {
+      provider:     opts.provider,
+      style:        opts.style,
+      zoom:         opts.zoom,
+      tileSize:     opts.tileSize,
+      bbox:         opts.bbox,
+      outputWidth:  opts.width,
+      outputHeight: opts.height
+    },
+    overlays: [],
+    stats: stats,
+  };
+}
+
+// ── Exports ────────────────────────────────────────────────────────────────────
+
+module.exports = {
+  mergeTiles,
+  lonLatToWorldPixel,
+  tileXYToWorldPixel,
+  bboxToPixelRect,
+  _validateTile:       validateTile,
+  _computeGridExtent:  computeGridExtent,
+  _clampCropRect:      clampCropRect,
+  _normaliseOptions:   normaliseOptions,
+};
