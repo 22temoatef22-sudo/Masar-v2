@@ -135,6 +135,78 @@ app.post("/geometry-only", async (req, res) => {
   }
 });
 
+// ── Vector Map — returns geometry only (no PNG) ──────────────
+// Used by new MapComp architecture: JSX builds everything as solids+shapes
+app.post("/vector-map", async (req, res) => {
+  try {
+    const { state={}, bbox, layers=[], style="dark", width=3840, height=2160 } = req.body;
+    const normalStyle = normalizeStyle(style);
+    const rawBbox = (bbox && bbox.minLon !== undefined)
+      ? bbox : { minLon:-180, maxLon:180, minLat:-85, maxLat:85 };
+
+    console.log(`[Masar v4] vector-map style:${normalStyle} ${width}x${height} ${layers.length} layers`);
+
+    const projection = buildProjection(rawBbox, width, height);
+
+    // Get world country rings for MapComp background
+    const world = await loadGeoData("countries");
+    const worldRings = [];
+    for (const f of world.features) {
+      const rings = [];
+      const toPixel = ([lon, lat]) => {
+        const [x, y] = projection([lon, lat]);
+        return [x, y];
+      };
+      if (f.geometry.type === "Polygon") {
+        rings.push(f.geometry.coordinates[0].map(toPixel));
+      } else if (f.geometry.type === "MultiPolygon") {
+        for (const p of f.geometry.coordinates) rings.push(p[0].map(toPixel));
+      }
+      worldRings.push(...rings);
+    }
+
+    // Simplify world rings for AE (max 150 points per ring)
+    const simplifiedWorld = worldRings.map(ring => {
+      if (ring.length <= 150) return ring;
+      const step = Math.ceil(ring.length / 150);
+      return ring.filter((_, i) => i % step === 0);
+    }).filter(r => r.length >= 3);
+
+    // Convert selected layers to pixel coords
+    const pixelLayers = layers.map(layer => {
+      const result = {
+        id:layer.id, name:layer.name, type:layer.type,
+        mode:layer.mode||"shape", color:layer.color||"#f97316"
+      };
+      if (!layer.geometry) return result;
+      if (layer.geometry.type==="Point" || layer.mode==="point") {
+        const [x,y] = pointToPixel(layer.geometry, projection);
+        result.pixelX=x; result.pixelY=y; result.geometryType="point";
+      } else {
+        result.rings = geometryToPixels(layer.geometry, projection, width, height);
+        result.geometryType = layer.geometry.type.includes("Line") ? "line" : "polygon";
+      }
+      return result;
+    });
+
+    console.log(`[Masar v4] vector-map done — ${simplifiedWorld.length} world rings, ${pixelLayers.length} layers`);
+
+    res.json({
+      success: true,
+      metadata: {
+        width, height, style: normalStyle,
+        layers: pixelLayers,
+        worldRings: simplifiedWorld,
+        mapW: width, mapH: height,
+        state
+      }
+    });
+  } catch(e) {
+    console.error("[Masar v4] vector-map error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Finalize — fetch high-res tiles per zoom level
 const tileCache = {};
 async function fetchTile(url) {
