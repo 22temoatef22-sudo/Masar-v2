@@ -17,9 +17,11 @@ function lonLatToPixel(lon, lat, bbox, width, height) {
   const yBot = mercY(south);
   const yFrac = (yTop - mercY(lat)) / (yTop - yBot);
 
+  // Fix: Offset by center to align with After Effects Shape Layer coordinates
+  // AE Anchor Points are [0,0], but Layer Position defaults to [width/2, height/2].
   return [
-    Math.round(xFrac * width * 100) / 100,
-    Math.round(yFrac * height * 100) / 100,
+    Math.round((xFrac * width) * 100) / 100 - (width / 2),
+    Math.round((yFrac * height) * 100) / 100 - (height / 2),
   ];
 }
 
@@ -278,20 +280,38 @@ function processGeoJSON(geojson, bbox, width, height) {
   const riverLines = [];
   let totalShapes = 0;
 
+  // --- AUDIT LOGGING VARIABLES ---
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  let firstProjectedPoint = null;
+  const [west, south, east, north] = bbox;
+  const centerLon = (west + east) / 2;
+  const centerLat = (south + north) / 2;
+
+  function trackBounds(ring) {
+    for (const [x, y] of ring) {
+      if (!firstProjectedPoint) firstProjectedPoint = [x, y];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  // -------------------------------
+
   const scored = geojson.features.map((f) => {
     let area = 0;
     try {
       const coords = f.geometry.coordinates;
       if (f.geometry.type === 'Polygon' && coords[0]) {
-        const ring = coords[0];
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        for (const [x, y] of ring) {
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
+        const ring = coords[0]; // [longitude, latitude]
+        let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
+        for (const [lon, lat] of ring) {
+          if (lon < minLng) minLng = lon;
+          if (lon > maxLng) maxLng = lon;
+          if (lat < minLat) minLat = lat;
+          if (lat > maxLat) maxLat = lat;
         }
-        area = (maxX - minX) * (maxY - minY);
+        area = (maxLng - minLng) * (maxLat - minLat);
       }
     } catch (_) {}
     return { feature: f, area };
@@ -324,6 +344,7 @@ function processGeoJSON(geojson, bbox, width, height) {
         const simplified = simplifyRing(projected, MAX_POINTS_PER_RING);
         if (simplified.length < 3) continue;
 
+        trackBounds(simplified);
         waterRings.push(simplified);
         totalShapes++;
       }
@@ -346,6 +367,7 @@ function processGeoJSON(geojson, bbox, width, height) {
           const simplified = simplifyRing(projected, MAX_POINTS_PER_RING);
           if (simplified.length < 2) continue;
 
+          trackBounds(simplified);
           borderRings.push(simplified);
           totalShapes++;
         }
@@ -369,12 +391,22 @@ function processGeoJSON(geojson, bbox, width, height) {
           const simplified = simplifyRing(projected, MAX_POINTS_PER_RING);
           if (simplified.length < 2) continue;
 
+          trackBounds(simplified);
           riverLines.push(simplified);
           totalShapes++;
         }
       }
     }
   }
+
+  // --- PRINT AUDIT LOGS ---
+  console.log('\n--- GEO-PROCESSOR AUDIT ---');
+  console.log(`BBOX (W, S, E, N): [${west}, ${south}, ${east}, ${north}]`);
+  console.log(`Center (Lon, Lat): [${centerLon}, ${centerLat}]`);
+  console.log(`First Projected Point (X, Y): [${firstProjectedPoint ? firstProjectedPoint.join(', ') : 'null'}]`);
+  console.log(`Projected Min X: ${minX}, Max X: ${maxX}`);
+  console.log(`Projected Min Y: ${minY}, Max Y: ${maxY}`);
+  console.log('---------------------------\n');
 
   return {
     waterRings,
