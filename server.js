@@ -1,113 +1,243 @@
 /**
- * ════════════════════════════════════════════════════════════════
- * POST /raster-map — Raster Export Endpoint
- * 
- * Add this route to your server.js alongside the existing /vector-map route.
- * 
- * Request body:
- *   { bbox, zoom, style, width, height, format?, provider? }
- * 
- * Response:
- *   { success, image (base64), metadata, stats, timing }
- * ════════════════════════════════════════════════════════════════
+ * Masar v3 — Central API Server
+ * * Orchestration layer. Contains no legacy D3/Canvas code.
+ * Routes requests directly to specialized raster/vector engines.
  */
 
-// ── Add this route in server.js after app.post('/vector-map', ...) ──
+'use strict';
 
-app.post('/raster-map', async (req, res) => {
-  const tag = '[raster-map]';
+const express = require('express');
+const cors = require('cors');
+
+// ── Engine Imports ─────────────────────────────────────────────────────────────
+const openfreemap = require('./src/providers/openfreemap');
+const { cache: tileCache } = require('./src/tiles/tile-cache');
+const { exportRaster } = require('./src/export/raster-export');
+const { exportVector } = require('./src/vector/vector-export');
+const { buildRoute } = require('./src/vector/route-engine');
+
+const app = express();
+
+// Middleware
+app.use(cors());
+// 50mb limit to handle exceptionally large custom flight path / point arrays
+app.use(express.json({ limit: '50mb' })); 
+
+// ── Diagnostics & Logging ──────────────────────────────────────────────────────
+
+function dbg(namespace, msg) {
+  console.log(`[${namespace}] ${msg}`);
+}
+
+// ── Centralized Response Helpers ───────────────────────────────────────────────
+
+function sendSuccess(res, namespace, data, startTime) {
+  const durationMs = Date.now() - startTime;
+  dbg(namespace, `200 OK (${durationMs}ms)`);
+  
+  res.status(200).json({
+    success: true,
+    ...data,
+    timing: {
+      startTime: new Date(startTime).toISOString(),
+      endTime: new Date().toISOString(),
+      durationMs: durationMs
+    }
+  });
+}
+
+function sendError(res, namespace, error, status = 500) {
+  const message = error instanceof Error ? error.message : String(error);
+  dbg(namespace, `${status} ERROR: ${message}`);
+  
+  res.status(status).json({
+    success: false,
+    error: message
+  });
+}
+
+// ── API Endpoints ──────────────────────────────────────────────────────────────
+
+/**
+ * 1) GET /health
+ * Returns system health, provider specs, and memory cache stats.
+ */
+app.get('/health', (req, res) => {
   const startTime = Date.now();
+  const namespace = 'server';
+  dbg(namespace, 'GET /health');
 
   try {
-    console.log(tag, 'POST /raster-map');
+    const providerInfo = openfreemap.getProviderInfo();
+    const cacheStats = tileCache.getStats();
 
-    const {
-      bbox,
-      zoom,
-      style    = 'dark',
-      width    = 1920,
-      height   = 1080,
-      format   = 'png',
-      provider = 'openfreemap',
-      padding  = 0,       // extra padding factor (0 = viewport only, 1 = 2x area)
-    } = req.body;
+    const healthData = {
+      status: 'healthy',
+      version: '3.0.0',
+      provider: providerInfo,
+      cache: cacheStats
+    };
 
-    // ── Validate ────────────────────────────────────────────────
-    if (!Array.isArray(bbox) || bbox.length !== 4) {
-      return res.status(400).json({
-        success: false,
-        error: 'bbox must be [west, south, east, north]'
-      });
-    }
-
-    if (typeof zoom !== 'number' || zoom < 0 || zoom > 18) {
-      return res.status(400).json({
-        success: false,
-        error: 'zoom must be a number between 0 and 18'
-      });
-    }
-
-    // ── Optional: expand bbox for camera movement headroom ─────
-    let exportBbox = bbox;
-    if (padding > 0) {
-      const lonSpan = bbox[2] - bbox[0];
-      const latSpan = bbox[3] - bbox[1];
-      const padLon = lonSpan * padding;
-      const padLat = latSpan * padding;
-      exportBbox = [
-        bbox[0] - padLon,
-        bbox[1] - padLat,
-        bbox[2] + padLon,
-        bbox[3] + padLat,
-      ];
-    }
-
-    // ── Clamp dimensions to merger max (8192) ──────────────────
-    const clampedWidth  = Math.min(Math.round(width),  8192);
-    const clampedHeight = Math.min(Math.round(height), 8192);
-
-    console.log(tag, `style=${style} zoom=${zoom} ${clampedWidth}x${clampedHeight} padding=${padding}`);
-    console.log(tag, `bbox=[${exportBbox.map(n => n.toFixed(4)).join(', ')}]`);
-
-    // ── Call raster export pipeline ────────────────────────────
-    const result = await exportRaster({
-      provider:   provider,
-      style:      style,
-      bbox:       exportBbox,
-      zoom:       Math.round(zoom),
-      width:      clampedWidth,
-      height:     clampedHeight,
-      format:     format,
-    });
-
-    // ── Convert buffer to base64 ──────────────────────────────
-    const base64Image = result.buffer.toString('base64');
-    const durationMs  = Date.now() - startTime;
-
-    console.log(tag, `200 OK (${durationMs}ms) — ${Math.round(base64Image.length / 1024)}KB base64`);
-
-    res.json({
-      success:  true,
-      image:    base64Image,        // base64 PNG — raster-builder.jsx consumes this
-      format:   result.format,
-      width:    result.width,
-      height:   result.height,
-      bbox:     result.bbox,
-      zoom:     result.zoom,
-      metadata: result.metadata,
-      stats:    result.stats,
-      timing: {
-        totalMs: durationMs,
-      },
-    });
-
+    sendSuccess(res, namespace, healthData, startTime);
   } catch (err) {
-    const durationMs = Date.now() - startTime;
-    console.error(tag, `ERROR (${durationMs}ms):`, err.message);
-
-    res.status(err.message.includes('validation') ? 502 : 500).json({
-      success: false,
-      error:   err.message,
-    });
+    sendError(res, namespace, err);
   }
+});
+
+/**
+ * 2) POST /vector-map
+ * Orchestrates MVT decoding -> GeoJSON filtering -> Vector Alignment.
+ */
+app.post('/vector-map', async (req, res) => {
+  const startTime = Date.now();
+  const namespace = 'vector-map';
+  dbg(namespace, 'POST /vector-map');
+
+  try {
+    const { bbox, zoom, width, height, style, layers, simplify, clip, limits } = req.body;
+
+    const payload = await exportVector({
+      provider: 'openfreemap',
+      style: style || 'dark',
+      bbox: bbox,
+      zoom: zoom,
+      width: width,
+      height: height,
+      layers: layers,
+      simplify: simplify,
+      clip: clip,
+      limits: limits
+    });
+
+    const responseData = {
+      metadata: payload.metadata,
+      stats: payload.stats,
+      waterRings: payload.waterRings,
+      borderRings: payload.borderRings,
+      riverLines: payload.riverLines,
+      outputBounds: payload.outputBounds
+    };
+
+    sendSuccess(res, namespace, responseData, startTime);
+  } catch (err) {
+    sendError(res, namespace, err, 400);
+  }
+});
+
+/**
+ * 3) POST /raster-map
+ * Orchestrates Raster Download -> Sharp Pipeline -> Output encoding.
+ */
+app.post('/raster-map', async (req, res) => {
+  const startTime = Date.now();
+  const namespace = 'raster-map';
+  dbg(namespace, 'POST /raster-map');
+
+  try {
+    const { bbox, zoom, width, height, style, format, backgroundColor } = req.body;
+
+    const exportResult = await exportRaster({
+      provider: 'openfreemap',
+      style: style || 'dark',
+      bbox: bbox,
+      zoom: zoom,
+      width: width,
+      height: height,
+      format: format || 'png',
+      backgroundColor: backgroundColor
+    });
+
+    // Convert binary buffer to Base64 payload for Phase 1 JSON transmission
+    const imageBase64 = exportResult.buffer.toString('base64');
+
+    const responseData = {
+      image: imageBase64,
+      bounds: exportResult.bbox,
+      stats: exportResult.stats,
+      metadata: exportResult.metadata
+    };
+
+    sendSuccess(res, namespace, responseData, startTime);
+  } catch (err) {
+    sendError(res, namespace, err, 400);
+  }
+});
+
+/**
+ * 4) POST /route
+ * Generates Great Circle or straight IDL-safe paths for AE animations.
+ */
+app.post('/route', (req, res) => {
+  const startTime = Date.now();
+  const namespace = 'route';
+  dbg(namespace, 'POST /route');
+
+  try {
+    const { start, end, routeType, width, height, bbox, simplify, smooth } = req.body;
+
+    if (!start || !end) {
+      throw new Error("Missing 'start' or 'end' coordinate objects.");
+    }
+
+    const routeData = buildRoute({
+      points: [start, end],
+      bbox: bbox,
+      width: width,
+      height: height,
+      routeType: routeType,
+      simplify: simplify,
+      smooth: smooth
+    });
+
+    sendSuccess(res, namespace, routeData, startTime);
+  } catch (err) {
+    sendError(res, namespace, err, 400);
+  }
+});
+
+/**
+ * 5) GET /provider
+ * Fetches provider capabilities and supported styles.
+ */
+app.get('/provider', (req, res) => {
+  const startTime = Date.now();
+  const namespace = 'provider';
+  dbg(namespace, 'GET /provider');
+
+  try {
+    const providerInfo = openfreemap.getProviderInfo();
+    sendSuccess(res, namespace, providerInfo, startTime);
+  } catch (err) {
+    sendError(res, namespace, err);
+  }
+});
+
+/**
+ * 6) GET /cache
+ * Diagnostics for LRU memory management.
+ */
+app.get('/cache', (req, res) => {
+  const startTime = Date.now();
+  const namespace = 'cache';
+  dbg(namespace, 'GET /cache');
+
+  try {
+    const stats = tileCache.getStats();
+    sendSuccess(res, namespace, stats, startTime);
+  } catch (err) {
+    sendError(res, namespace, err);
+  }
+});
+
+// ── Global Error Fallback ──────────────────────────────────────────────────────
+
+app.use((err, req, res, next) => {
+  sendError(res, 'server', err, 500);
+});
+
+// ── Boot sequence ──────────────────────────────────────────────────────────────
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  dbg('server', `Masar v3 Core API Online — Listening on Port ${PORT}`);
 });
