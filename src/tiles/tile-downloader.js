@@ -472,11 +472,18 @@ async function downloadTiles(request) {
   // Runs once per process. Subsequent calls return instantly.
   // Positioned after the empty-list guard so zero-tile batches never validate.
 
-  await ensureProviderValidated();
+  if (!request._directTileURL) { await ensureProviderValidated(); }
 
   // ── Resolve tile URL template (one async call, provider caches internally) ─
 
-  var urlTemplate = await resolveTileURLTemplate(type, ofmStyleId);
+  var urlTemplate;
+  if (request._directTileURL) {
+    urlTemplate = request._directTileURL;
+    dbg("using direct tile URL: " + urlTemplate);
+  } else {
+    await ensureProviderValidated();
+    urlTemplate = await resolveTileURLTemplate(type, ofmStyleId);
+  }
   dbg('template resolved: ' + urlTemplate + ' | tiles: ' + tileList.length + ' | concurrency: ' + concurrency);
 
   // ── Session statistics ────────────────────────────────────────────────────
