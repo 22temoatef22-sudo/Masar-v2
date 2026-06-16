@@ -22,22 +22,20 @@
 // All services below are free for reasonable usage.
 
 const RASTER_TILES = {
-  // CartoDB / CARTO — same styles as MapLibre preview
-  carto_dark:       'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png',
-  carto_light:      'https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
-  carto_voyager:    'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
+  // CartoDB / CARTO — free, no API key, @2x retina
+  carto_dark:          'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png',
+  carto_dark_nolabels: 'https://basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}@2x.png',
+  carto_light:         'https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
+  carto_light_nolabels:'https://basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}@2x.png',
+  carto_voyager:       'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
+  carto_voyager_nolabels:'https://basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}@2x.png',
 
-  // Stadia Maps (Stamen styles) — free tier available
-  stadia_toner:       'https://tiles.stadiamaps.com/tiles/stamen_toner/{z}/{x}/{y}@2x.png',
-  stadia_terrain:     'https://tiles.stadiamaps.com/tiles/stamen_terrain/{z}/{x}/{y}@2x.png',
-  stadia_watercolor:  'https://tiles.stadiamaps.com/tiles/stamen_watercolor/{z}/{x}/{y}.jpg',
+  // Esri — free, no API key
+  esri_satellite:      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  esri_topo:           'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
 
-  // Esri — free for non-commercial / limited commercial
-  esri_satellite:   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-  esri_topo:        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
-
-  // OpenTopoMap — free
-  opentopomap:      'https://tile.opentopomap.org/{z}/{x}/{y}.png',
+  // OpenTopoMap — free, no API key
+  opentopomap:         'https://tile.opentopomap.org/{z}/{x}/{y}.png',
 };
 
 // ── MapLibre Style URLs (for CEP panel preview) ───────────────────────────────
@@ -75,11 +73,11 @@ const THEME_RASTER_MAP = {
   dark:       RASTER_TILES.carto_dark,
   light:      RASTER_TILES.carto_light,
   topo:       RASTER_TILES.carto_voyager,
-  neon:       RASTER_TILES.carto_dark,          // dark base + neon paint in AE
+  neon:       RASTER_TILES.carto_dark_nolabels,   // dark base, neon effect in AE
   satellite:  RASTER_TILES.esri_satellite,
-  terrain:    RASTER_TILES.stadia_terrain,
-  watercolor: RASTER_TILES.stadia_watercolor,
-  toner:      RASTER_TILES.stadia_toner,
+  terrain:    RASTER_TILES.opentopomap,            // free topographic map
+  watercolor: RASTER_TILES.carto_voyager,          // voyager as warm-tone base
+  toner:      RASTER_TILES.carto_light_nolabels,   // high-contrast light
   liberty:    RASTER_TILES.carto_voyager,
   bright:     RASTER_TILES.carto_voyager,
   positron:   RASTER_TILES.carto_light,
