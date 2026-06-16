@@ -1,41 +1,99 @@
 /**
  * Masar v3 — Theme Configuration
  *
- * Maps Masar display theme names to provider style IDs and paint override palettes.
- * This is a pure data/config file. No network calls. No provider logic.
+ * Maps Masar display theme names to:
+ *   1. Provider style IDs (for vector tile decoding)
+ *   2. Raster tile URL templates (for high-res raster export)
+ *   3. MapLibre style URLs (for CEP panel preview)
+ *   4. Paint override palettes (for AE solid colors)
  *
- * Usage:
- *   const themes = require('./config/themes');
- *   const ofmStyleId = themes.resolveProviderStyle('openfreemap', 'dark');
- *   const palette    = themes.getPalette('dark');
+ * Pure data/config. No network calls. No provider logic.
  */
 
-// ── Theme → Provider Style Mapping ────────────────────────────────────────────
+'use strict';
 
-// Maps a Masar theme name to the native style ID for each provider.
-// Add a new provider column here when MapTiler / OSM support is added.
-const PROVIDER_STYLE_MAP = {
-  dark:     { openfreemap: 'liberty',  maptiler: null, osm: null },
-  light:    { openfreemap: 'positron', maptiler: null, osm: null },
-  liberty:  { openfreemap: 'liberty',  maptiler: null, osm: null },
-  topo:     { openfreemap: 'liberty',  maptiler: null, osm: null },
-  bright:   { openfreemap: 'bright',   maptiler: null, osm: null },
-  positron: { openfreemap: 'positron', maptiler: null, osm: null },
+// ── Raster Tile URL Templates ─────────────────────────────────────────────────
+//
+// These are direct raster tile URLs used by the raster export pipeline.
+// They bypass the OFM provider's getRasterTileURL() which only works
+// for styles that have a raster source in their style.json.
+//
+// All URLs use {z}/{x}/{y} placeholders.
+// All services below are free for reasonable usage.
+
+const RASTER_TILES = {
+  // CartoDB / CARTO — same styles as MapLibre preview
+  carto_dark:       'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png',
+  carto_light:      'https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
+  carto_voyager:    'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
+
+  // Stadia Maps (Stamen styles) — free tier available
+  stadia_toner:       'https://tiles.stadiamaps.com/tiles/stamen_toner/{z}/{x}/{y}@2x.png',
+  stadia_terrain:     'https://tiles.stadiamaps.com/tiles/stamen_terrain/{z}/{x}/{y}@2x.png',
+  stadia_watercolor:  'https://tiles.stadiamaps.com/tiles/stamen_watercolor/{z}/{x}/{y}.jpg',
+
+  // Esri — free for non-commercial / limited commercial
+  esri_satellite:   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  esri_topo:        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
+
+  // OpenTopoMap — free
+  opentopomap:      'https://tile.opentopomap.org/{z}/{x}/{y}.png',
 };
 
-// ── Theme Palettes (Paint Overrides) ──────────────────────────────────────────
+// ── MapLibre Style URLs (for CEP panel preview) ───────────────────────────────
 
-// Masar-specific color palettes applied on top of the base provider style.
-// The preview engine uses these for MapLibre paint mutations.
-// The export engine uses them for AE solid layer colors.
-// null = use the provider's native palette without modification.
+const MAPLIBRE_STYLES = {
+  dark:       'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+  light:      'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
+  topo:       'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
+  neon:       'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',   // + neon paint overrides
+  satellite:  null,  // raster-only, no vector style
+  terrain:    null,  // raster-only
+  watercolor: null,  // raster-only
+  toner:      null,  // raster-only
+};
+
+// ── Theme → Provider Style Mapping (for vector export) ────────────────────────
+
+const PROVIDER_STYLE_MAP = {
+  dark:       { openfreemap: 'liberty',  maptiler: null, osm: null },
+  light:      { openfreemap: 'positron', maptiler: null, osm: null },
+  topo:       { openfreemap: 'liberty',  maptiler: null, osm: null },
+  neon:       { openfreemap: 'liberty',  maptiler: null, osm: null },
+  satellite:  { openfreemap: 'liberty',  maptiler: null, osm: null },
+  terrain:    { openfreemap: 'liberty',  maptiler: null, osm: null },
+  watercolor: { openfreemap: 'liberty',  maptiler: null, osm: null },
+  toner:      { openfreemap: 'positron', maptiler: null, osm: null },
+  liberty:    { openfreemap: 'liberty',  maptiler: null, osm: null },
+  bright:     { openfreemap: 'bright',   maptiler: null, osm: null },
+  positron:   { openfreemap: 'positron', maptiler: null, osm: null },
+};
+
+// ── Theme → Raster Tile URL Mapping ───────────────────────────────────────────
+
+const THEME_RASTER_MAP = {
+  dark:       RASTER_TILES.carto_dark,
+  light:      RASTER_TILES.carto_light,
+  topo:       RASTER_TILES.carto_voyager,
+  neon:       RASTER_TILES.carto_dark,          // dark base + neon paint in AE
+  satellite:  RASTER_TILES.esri_satellite,
+  terrain:    RASTER_TILES.stadia_terrain,
+  watercolor: RASTER_TILES.stadia_watercolor,
+  toner:      RASTER_TILES.stadia_toner,
+  liberty:    RASTER_TILES.carto_voyager,
+  bright:     RASTER_TILES.carto_voyager,
+  positron:   RASTER_TILES.carto_light,
+};
+
+// ── Theme Palettes (for AE solid colors + vector overlays) ────────────────────
+
 const THEME_PALETTES = {
   dark: {
     ocean:  '#080c14',
     land:   '#141c28',
-    border: '#2a3550',
-    water:  '#0d1520',
-    river:  '#1a2a40',
+    border: '#4a5a7a',
+    water:  '#1a3050',
+    river:  '#2a5a8a',
   },
   light: {
     ocean:  '#a8c8e8',
@@ -51,6 +109,41 @@ const THEME_PALETTES = {
     water:  '#7ba7bc',
     river:  '#5a8fa8',
   },
+  neon: {
+    ocean:  '#020208',
+    land:   '#0a0a18',
+    border: '#00ffff',
+    water:  '#003060',
+    river:  '#0080ff',
+  },
+  satellite: {
+    ocean:  '#0a1a2a',
+    land:   '#2a3a20',
+    border: '#ffaa00',
+    water:  '#0a1a2a',
+    river:  '#1a4a6a',
+  },
+  terrain: {
+    ocean:  '#7ba7bc',
+    land:   '#c8c0a0',
+    border: '#6a5a40',
+    water:  '#7ba7bc',
+    river:  '#5a8fa8',
+  },
+  watercolor: {
+    ocean:  '#88b8c8',
+    land:   '#e0d8c0',
+    border: '#8a7a60',
+    water:  '#88b8c8',
+    river:  '#6a9ab0',
+  },
+  toner: {
+    ocean:  '#ffffff',
+    land:   '#ffffff',
+    border: '#000000',
+    water:  '#cccccc',
+    river:  '#aaaaaa',
+  },
   liberty:  null,
   bright:   null,
   positron: null,
@@ -58,22 +151,10 @@ const THEME_PALETTES = {
 
 // ── Public API ─────────────────────────────────────────────────────────────────
 
-/**
- * Get all known Masar theme names.
- * @returns {string[]}
- */
 function getThemeNames() {
-  return Object.keys(PROVIDER_STYLE_MAP);
+  return Object.keys(THEME_RASTER_MAP);
 }
 
-/**
- * Translate a Masar theme name to a provider-native style ID.
- *
- * @param {string} providerId — e.g. 'openfreemap'
- * @param {string} themeId    — e.g. 'dark'
- * @returns {string} provider-native style ID
- * @throws if theme is unknown or provider has no mapping for it
- */
 function resolveProviderStyle(providerId, themeId) {
   var theme = PROVIDER_STYLE_MAP[themeId];
   if (!theme) {
@@ -87,12 +168,32 @@ function resolveProviderStyle(providerId, themeId) {
 }
 
 /**
- * Get the paint override palette for a Masar theme.
- * Returns null for themes that use the provider's native palette.
+ * Get the direct raster tile URL template for a Masar theme.
+ * This bypasses the provider's getRasterTileURL() for guaranteed results.
  *
  * @param {string} themeId
- * @returns {Object|null}
+ * @returns {string} URL template with {z}/{x}/{y}
  */
+function getRasterTileURL(themeId) {
+  var url = THEME_RASTER_MAP[themeId];
+  if (!url) {
+    // Fallback to CartoDB voyager
+    return RASTER_TILES.carto_voyager;
+  }
+  return url;
+}
+
+/**
+ * Get the MapLibre style URL for the CEP panel preview.
+ * Returns null for raster-only themes.
+ *
+ * @param {string} themeId
+ * @returns {string|null}
+ */
+function getMapLibreStyleURL(themeId) {
+  return MAPLIBRE_STYLES[themeId] || null;
+}
+
 function getPalette(themeId) {
   if (!(themeId in THEME_PALETTES)) {
     throw new Error('[themes] Unknown theme: "' + themeId + '"');
@@ -100,11 +201,6 @@ function getPalette(themeId) {
   return THEME_PALETTES[themeId];
 }
 
-/**
- * Return true if this theme applies custom paint overrides.
- * @param {string} themeId
- * @returns {boolean}
- */
 function hasCustomPalette(themeId) {
   return THEME_PALETTES[themeId] !== null && THEME_PALETTES[themeId] !== undefined;
 }
@@ -112,6 +208,9 @@ function hasCustomPalette(themeId) {
 module.exports = {
   getThemeNames,
   resolveProviderStyle,
+  getRasterTileURL,
+  getMapLibreStyleURL,
   getPalette,
   hasCustomPalette,
+  RASTER_TILES,
 };
