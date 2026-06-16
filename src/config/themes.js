@@ -22,20 +22,11 @@
 // All services below are free for reasonable usage.
 
 const RASTER_TILES = {
-  // CartoDB / CARTO — free, no API key, @2x retina
-  carto_dark:          'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png',
-  carto_dark_nolabels: 'https://basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}@2x.png',
-  carto_light:         'https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
-  carto_light_nolabels:'https://basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}@2x.png',
-  carto_voyager:       'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
-  carto_voyager_nolabels:'https://basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}@2x.png',
-
-  // Esri — free, no API key
-  esri_satellite:      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-  esri_topo:           'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
-
-  // OpenTopoMap — free, no API key
-  opentopomap:         'https://tile.opentopomap.org/{z}/{x}/{y}.png',
+  carto_dark:      'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png',
+  carto_light:     'https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
+  carto_voyager:   'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
+  esri_satellite:  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  opentopomap:     'https://tile.opentopomap.org/{z}/{x}/{y}.png',
 };
 
 // ── MapLibre Style URLs (for CEP panel preview) ───────────────────────────────
@@ -54,33 +45,21 @@ const MAPLIBRE_STYLES = {
 // ── Theme → Provider Style Mapping (for vector export) ────────────────────────
 
 const PROVIDER_STYLE_MAP = {
-  dark:       { openfreemap: 'liberty',  maptiler: null, osm: null },
-  light:      { openfreemap: 'positron', maptiler: null, osm: null },
-  topo:       { openfreemap: 'liberty',  maptiler: null, osm: null },
-  neon:       { openfreemap: 'liberty',  maptiler: null, osm: null },
-  satellite:  { openfreemap: 'liberty',  maptiler: null, osm: null },
-  terrain:    { openfreemap: 'liberty',  maptiler: null, osm: null },
-  watercolor: { openfreemap: 'liberty',  maptiler: null, osm: null },
-  toner:      { openfreemap: 'positron', maptiler: null, osm: null },
-  liberty:    { openfreemap: 'liberty',  maptiler: null, osm: null },
-  bright:     { openfreemap: 'bright',   maptiler: null, osm: null },
-  positron:   { openfreemap: 'positron', maptiler: null, osm: null },
+  dark:      { openfreemap: 'liberty',  maptiler: null, osm: null },
+  light:     { openfreemap: 'positron', maptiler: null, osm: null },
+  topo:      { openfreemap: 'liberty',  maptiler: null, osm: null },
+  satellite: { openfreemap: 'liberty',  maptiler: null, osm: null },
+  terrain:   { openfreemap: 'liberty',  maptiler: null, osm: null },
 };
 
 // ── Theme → Raster Tile URL Mapping ───────────────────────────────────────────
 
 const THEME_RASTER_MAP = {
-  dark:       RASTER_TILES.carto_dark,
-  light:      RASTER_TILES.carto_light,
-  topo:       RASTER_TILES.carto_voyager,
-  neon:       RASTER_TILES.carto_dark_nolabels,   // dark base, neon effect in AE
-  satellite:  RASTER_TILES.esri_satellite,
-  terrain:    RASTER_TILES.opentopomap,            // free topographic map
-  watercolor: RASTER_TILES.carto_voyager,          // voyager as warm-tone base
-  toner:      RASTER_TILES.carto_light_nolabels,   // high-contrast light
-  liberty:    RASTER_TILES.carto_voyager,
-  bright:     RASTER_TILES.carto_voyager,
-  positron:   RASTER_TILES.carto_light,
+  dark:      RASTER_TILES.carto_dark,
+  light:     RASTER_TILES.carto_light,
+  topo:      RASTER_TILES.carto_voyager,
+  satellite: RASTER_TILES.esri_satellite,
+  terrain:   RASTER_TILES.opentopomap,
 };
 
 // ── Theme Palettes (for AE solid colors + vector overlays) ────────────────────
@@ -107,13 +86,6 @@ const THEME_PALETTES = {
     water:  '#7ba7bc',
     river:  '#5a8fa8',
   },
-  neon: {
-    ocean:  '#020208',
-    land:   '#0a0a18',
-    border: '#00ffff',
-    water:  '#003060',
-    river:  '#0080ff',
-  },
   satellite: {
     ocean:  '#0a1a2a',
     land:   '#2a3a20',
@@ -128,23 +100,6 @@ const THEME_PALETTES = {
     water:  '#7ba7bc',
     river:  '#5a8fa8',
   },
-  watercolor: {
-    ocean:  '#88b8c8',
-    land:   '#e0d8c0',
-    border: '#8a7a60',
-    water:  '#88b8c8',
-    river:  '#6a9ab0',
-  },
-  toner: {
-    ocean:  '#ffffff',
-    land:   '#ffffff',
-    border: '#000000',
-    water:  '#cccccc',
-    river:  '#aaaaaa',
-  },
-  liberty:  null,
-  bright:   null,
-  positron: null,
 };
 
 // ── Public API ─────────────────────────────────────────────────────────────────
