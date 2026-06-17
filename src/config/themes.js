@@ -22,9 +22,9 @@
 // All services below are free for reasonable usage.
 
 const RASTER_TILES = {
-  carto_dark:      'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png',
-  carto_light:     'https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
-  carto_voyager:   'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
+  carto_dark:      'https://basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}@2x.png',
+  carto_light:     'https://basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}@2x.png',
+  carto_voyager:   'https://basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}@2x.png',
   esri_satellite:  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
   opentopomap:     'https://tile.opentopomap.org/{z}/{x}/{y}.png',
 };
@@ -55,11 +55,11 @@ const PROVIDER_STYLE_MAP = {
 // ── Theme → Raster Tile URL Mapping ───────────────────────────────────────────
 
 const THEME_RASTER_MAP = {
-  dark:      RASTER_TILES.carto_dark,
-  light:     RASTER_TILES.carto_light,
-  topo:      RASTER_TILES.carto_voyager,
-  satellite: RASTER_TILES.esri_satellite,
-  terrain:   RASTER_TILES.opentopomap,
+  dark:      { url: RASTER_TILES.carto_dark,     tileSize: 512 },
+  light:     { url: RASTER_TILES.carto_light,    tileSize: 512 },
+  topo:      { url: RASTER_TILES.carto_voyager,  tileSize: 512 },
+  satellite: { url: RASTER_TILES.esri_satellite, tileSize: 256 },
+  terrain:   { url: RASTER_TILES.opentopomap,    tileSize: 256 },
 };
 
 // ── Theme Palettes (for AE solid colors + vector overlays) ────────────────────
@@ -128,12 +128,23 @@ function resolveProviderStyle(providerId, themeId) {
  * @returns {string} URL template with {z}/{x}/{y}
  */
 function getRasterTileURL(themeId) {
-  var url = THEME_RASTER_MAP[themeId];
-  if (!url) {
-    // Fallback to CartoDB voyager
+  var entry = THEME_RASTER_MAP[themeId];
+  if (!entry) {
     return RASTER_TILES.carto_voyager;
   }
-  return url;
+  return entry.url;
+}
+
+/**
+ * Get the tile pixel size for a Masar theme.
+ * CartoDB @2x tiles are 512px. Esri/OpenTopoMap are 256px.
+ *
+ * @param {string} themeId
+ * @returns {number} 256 or 512
+ */
+function getRasterTileSize(themeId) {
+  var entry = THEME_RASTER_MAP[themeId];
+  return (entry && entry.tileSize) ? entry.tileSize : 256;
 }
 
 /**
@@ -162,6 +173,7 @@ module.exports = {
   getThemeNames,
   resolveProviderStyle,
   getRasterTileURL,
+  getRasterTileSize,
   getMapLibreStyleURL,
   getPalette,
   hasCustomPalette,
