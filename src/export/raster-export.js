@@ -51,7 +51,8 @@ async function exportRaster(options) {
   // ── Resolve raster tile URL directly from theme ─────────────────────────────
 
   var rasterTileURL = themes.getRasterTileURL(options.style);
-  dbg('Raster tile URL for "' + options.style + '": ' + rasterTileURL);
+  var tileSize = themes.getRasterTileSize(options.style);
+  dbg('Raster tile URL for "' + options.style + '": ' + rasterTileURL + ' (tileSize=' + tileSize + ')');
 
   // ── Compute required tiles ──────────────────────────────────────────────────
 
@@ -107,6 +108,7 @@ async function exportRaster(options) {
     zoom: options.zoom,
     width: options.width,
     height: options.height,
+    tileSize: tileSize,
     outputFormat: format,
     backgroundColor: options.backgroundColor,
     provider: 'direct',
