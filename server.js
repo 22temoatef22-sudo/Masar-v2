@@ -152,6 +152,8 @@ app.post('/raster-map', async (req, res) => {
 
     const responseData = {
       image: imageBase64,
+      width: exportResult.width,
+      height: exportResult.height,
       bounds: exportResult.bbox,
       stats: exportResult.stats,
       metadata: exportResult.metadata
