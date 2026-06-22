@@ -169,11 +169,33 @@ function hasCustomPalette(themeId) {
   return THEME_PALETTES[themeId] !== null && THEME_PALETTES[themeId] !== undefined;
 }
 
+/**
+ * Get the opaque background color for the raster tile merger.
+ * Uses the ocean color from the theme palette (areas outside map coverage = ocean).
+ *
+ * @param {string} themeId
+ * @returns {{ r: number, g: number, b: number, alpha: number }}
+ */
+function getBackgroundColor(themeId) {
+  var palette = THEME_PALETTES[themeId];
+  if (!palette || !palette.ocean) {
+    return { r: 0, g: 0, b: 0, alpha: 1 };
+  }
+  var hex = palette.ocean.replace('#', '');
+  return {
+    r: parseInt(hex.substring(0, 2), 16),
+    g: parseInt(hex.substring(2, 4), 16),
+    b: parseInt(hex.substring(4, 6), 16),
+    alpha: 1
+  };
+}
+
 module.exports = {
   getThemeNames,
   resolveProviderStyle,
   getRasterTileURL,
   getRasterTileSize,
+  getBackgroundColor,
   getMapLibreStyleURL,
   getPalette,
   hasCustomPalette,
