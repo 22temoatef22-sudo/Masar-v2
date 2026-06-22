@@ -52,7 +52,8 @@ async function exportRaster(options) {
 
   var rasterTileURL = themes.getRasterTileURL(options.style);
   var tileSize = themes.getRasterTileSize(options.style);
-  dbg('Raster tile URL for "' + options.style + '": ' + rasterTileURL + ' (tileSize=' + tileSize + ')');
+  var bgColor = themes.getBackgroundColor(options.style);
+  dbg('Raster tile URL for "' + options.style + '": ' + rasterTileURL + ' (tileSize=' + tileSize + ', bg=rgba(' + bgColor.r + ',' + bgColor.g + ',' + bgColor.b + ',' + bgColor.alpha + '))');
 
   // ── Compute required tiles ──────────────────────────────────────────────────
 
@@ -110,7 +111,7 @@ async function exportRaster(options) {
     height: options.height,
     tileSize: tileSize,
     outputFormat: format,
-    backgroundColor: options.backgroundColor,
+    backgroundColor: options.backgroundColor || bgColor,
     provider: 'direct',
     style: options.style,
     signal: options.signal,
