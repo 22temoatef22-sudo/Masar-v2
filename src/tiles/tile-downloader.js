@@ -142,6 +142,7 @@ function lonToTileX(lon, zoom) {
 
 /**
  * Convert latitude to tile Y coordinate at a given zoom (Web Mercator).
+ * Uses Gudermannian form — identical to projection.js — for consistency.
  * @param {number} lat
  * @param {number} zoom
  * @returns {number}
@@ -149,7 +150,8 @@ function lonToTileX(lon, zoom) {
 function latToTileY(lat, zoom) {
   var latRad = lat * Math.PI / 180;
   var n      = Math.pow(2, zoom);
-  return Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
+  // Gudermannian form — matches projection.js and tile-merger.js exactly
+  return Math.floor((1 - Math.log(Math.tan(Math.PI / 4 + latRad / 2)) / Math.PI) / 2 * n);
 }
 
 /**
