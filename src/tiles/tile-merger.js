@@ -119,6 +119,96 @@ function tileXYToWorldPixel(tileX, tileY, tileSize) {
     y: tileY * tileSize,
   };
 }
+/**
+ * Compute the crop rectangle directly from camera state (center + zoom),
+ * without going through geographic coordinates.
+ *
+ * This is the CORRECT approach per the ChatGPT analysis:
+ *   1. Project center → world pixel (cx, cy)
+ *   2. Expand by output dimensions: left=cx-w/2, top=cy-h/2, right=cx+w/2, bottom=cy+h/2
+ *   3. Compute tile range: tileLeft=floor(left/tileSize), tileRight=floor((right-1)/tileSize)
+ *   4. Crop offset: offsetX = left - tileLeft*tileSize
+ *
+ * This avoids ALL geographic coordinate precision issues and tile coverage gaps.
+ *
+ * @param {number} centerLon  - map center longitude
+ * @param {number} centerLat  - map center latitude
+ * @param {number} zoom       - integer tile zoom level
+ * @param {number} outputW    - output width in pixels
+ * @param {number} outputH    - output height in pixels
+ * @param {number} tileSize   - tile size in pixels (512 for CartoDB, 256 for Esri)
+ * @param {number} xMin       - leftmost tile x in the downloaded grid
+ * @param {number} yMin       - topmost tile y in the downloaded grid
+ * @returns {{ left, top, width, height }}
+ */
+function viewportToPixelRect(centerLon, centerLat, zoom, outputW, outputH, tileSize, xMin, yMin) {
+  var intZoom = Math.floor(zoom);
+
+  // 1. Project center to world pixels
+  var center = lonLatToWorldPixel(centerLon, centerLat, intZoom, tileSize);
+  var cx = center.x;
+  var cy = center.y;
+
+  // 2. Viewport edges in world pixels
+  var left   = cx - outputW / 2;
+  var top    = cy - outputH / 2;
+  var right  = cx + outputW / 2;
+  var bottom = cy + outputH / 2;
+
+  // 3. Convert to mosaic-local pixels
+  var mosaicOriginX = xMin * tileSize;
+  var mosaicOriginY = yMin * tileSize;
+
+  return {
+    left:   Math.round(left   - mosaicOriginX),
+    top:    Math.round(top    - mosaicOriginY),
+    width:  Math.round(right  - left),
+    height: Math.round(bottom - top),
+  };
+}
+
+/**
+ * Compute which tiles are needed for a given camera viewport.
+ * Uses floor((right-1)/tileSize) to avoid the "one tile missing" bug.
+ *
+ * @returns {{ xMin, yMin, xMax, yMax, tileList }}
+ */
+function viewportToTileRange(centerLon, centerLat, zoom, outputW, outputH, tileSize) {
+  var intZoom = Math.floor(zoom);
+  var n = Math.pow(2, intZoom);
+
+  var center = lonLatToWorldPixel(centerLon, centerLat, intZoom, tileSize);
+  var cx = center.x;
+  var cy = center.y;
+
+  var left   = cx - outputW / 2;
+  var top    = cy - outputH / 2;
+  var right  = cx + outputW / 2;
+  var bottom = cy + outputH / 2;
+
+  // Correct tile range — floor((right-1)/tileSize) avoids missing last tile
+  var xMin = Math.floor(left   / tileSize);
+  var yMin = Math.floor(top    / tileSize);
+  var xMax = Math.floor((right  - 1) / tileSize);
+  var yMax = Math.floor((bottom - 1) / tileSize);
+
+  // Clamp to valid tile range
+  xMin = Math.max(0, xMin);
+  yMin = Math.max(0, yMin);
+  xMax = Math.min(n - 1, xMax);
+  yMax = Math.min(n - 1, yMax);
+
+  var tileList = [];
+  for (var tx = xMin; tx <= xMax; tx++) {
+    for (var ty = yMin; ty <= yMax; ty++) {
+      tileList.push({ z: intZoom, x: tx, y: ty });
+    }
+  }
+
+  return { xMin: xMin, yMin: yMin, xMax: xMax, yMax: yMax, tileList: tileList };
+}
+
+
 
 /**
  * Compute the pixel rectangle within the mosaic that corresponds to the
@@ -228,6 +318,7 @@ function normaliseOptions(options) {
     background:       background,
     showMissingTiles: !!options.showMissingTiles,
     signal:           options.signal,
+    _viewportCenter:  options._viewportCenter || null,
     layers:           Array.isArray(options.layers) ? options.layers : [],
     provider:         (options.provider && typeof options.provider === 'string') ? options.provider : 'unknown',
     style:            (options.style && typeof options.style === 'string') ? options.style : 'unknown',
@@ -440,11 +531,34 @@ async function mergeTiles(options) {
   var compositeInputs = buildCompositeInputs(validTiles, grid, opts.tileSize);
 
   // ── Step 6: Compute crop rectangle ─────────────────────────────────────────
+  //
+  // VIEWPORT PATH (preferred): center + zoom → pixel rect directly.
+  //   No geographic re-derivation. No floating-point bbox errors.
+  //   Guarantees crop exactly matches the output dimensions.
+  //
+  // BBOX PATH (legacy): geographic bbox → world pixels → crop rect.
+  //   May have small precision errors. Kept for backward compatibility.
 
-  var rawCrop  = bboxToPixelRect(opts.bbox, opts.zoom, opts.tileSize, grid.xMin, grid.yMin);
+  var rawCrop;
+  if (opts._viewportCenter &&
+      Array.isArray(opts._viewportCenter) &&
+      typeof opts._viewportCenter[0] === 'number') {
+
+    rawCrop = viewportToPixelRect(
+      opts._viewportCenter[0], opts._viewportCenter[1],
+      opts.zoom, opts.width, opts.height,
+      opts.tileSize, grid.xMin, grid.yMin
+    );
+    dbg('VIEWPORT crop: ' + rawCrop.left + ',' + rawCrop.top +
+        ' ' + rawCrop.width + 'x' + rawCrop.height);
+
+  } else {
+    rawCrop = bboxToPixelRect(opts.bbox, opts.zoom, opts.tileSize, grid.xMin, grid.yMin);
+    dbg('BBOX crop: ' + rawCrop.left + ',' + rawCrop.top +
+        ' ' + rawCrop.width + 'x' + rawCrop.height);
+  }
+
   var cropRect = clampCropRect(rawCrop, mosaicW, mosaicH);
-
-  dbg('raw crop: ' + rawCrop.left + ',' + rawCrop.top + ' ' + rawCrop.width + 'x' + rawCrop.height);
   dbg('clamped crop: ' + cropRect.left + ',' + cropRect.top + ' ' + cropRect.width + 'x' + cropRect.height);
 
   // ── Step 7: Sharp pipeline ──────────────────────────────────────────────────
@@ -548,6 +662,8 @@ module.exports = {
   lonLatToWorldPixel,
   tileXYToWorldPixel,
   bboxToPixelRect,
+  viewportToPixelRect,
+  viewportToTileRange,
   _validateTile:       validateTile,
   _computeGridExtent:  computeGridExtent,
   _clampCropRect:      clampCropRect,
