@@ -127,6 +127,13 @@ app.post('/vector-map', async (req, res) => {
 /**
  * 3) POST /raster-map
  * Orchestrates Raster Download -> Sharp Pipeline -> Output encoding.
+ *
+ * Accepts two modes:
+ *   A) { center: [lon, lat], zoom, width, height, style } ← preferred (viewport-based)
+ *   B) { bbox: [W,S,E,N],   zoom, width, height, style } ← legacy fallback
+ *
+ * Mode A produces pixel-perfect output matching MapLibre at the same center/zoom.
+ * Mode B is kept for backwards compatibility with the vector pipeline.
  */
 app.post('/raster-map', async (req, res) => {
   const startTime = Date.now();
@@ -134,16 +141,17 @@ app.post('/raster-map', async (req, res) => {
   dbg(namespace, 'POST /raster-map');
 
   try {
-    const { bbox, zoom, width, height, style, format, backgroundColor } = req.body;
+    const { center, bbox, zoom, width, height, style, format, backgroundColor } = req.body;
 
     const exportResult = await exportRaster({
       provider: 'openfreemap',
-      style: style || 'dark',
-      bbox: bbox,
-      zoom: zoom,
-      width: width,
-      height: height,
-      format: format || 'png',
+      style:    style  || 'dark',
+      center:   center || null,   // [lon, lat] — preferred
+      bbox:     bbox   || null,   // [W,S,E,N]  — fallback
+      zoom:     zoom,
+      width:    width,
+      height:   height,
+      format:   format || 'png',
       backgroundColor: backgroundColor
     });
 
