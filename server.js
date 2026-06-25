@@ -141,17 +141,35 @@ app.post('/raster-map', async (req, res) => {
   dbg(namespace, 'POST /raster-map');
 
   try {
-    const { center, bbox, zoom, width, height, style, format, backgroundColor } = req.body;
+    const {
+      // New camera snapshot API (preferred)
+      camera, referenceViewport, renderTarget, tileSize,
+      // Legacy API (fallback)
+      center, bbox, zoom, width, height,
+      // Common
+      style, format, backgroundColor
+    } = req.body;
+
+    // Resolve params: camera snapshot takes priority
+    const resolvedCenter = camera ? camera.center : center;
+    const resolvedZoom   = camera ? camera.zoom   : zoom;
+    const resolvedWidth  = renderTarget ? renderTarget.width  : width;
+    const resolvedHeight = renderTarget ? renderTarget.height : height;
 
     const exportResult = await exportRaster({
-      provider: 'openfreemap',
-      style:    style  || 'dark',
-      center:   center || null,   // [lon, lat] — preferred
-      bbox:     bbox   || null,   // [W,S,E,N]  — fallback
-      zoom:     zoom,
-      width:    width,
-      height:   height,
+      style:    style || 'dark',
       format:   format || 'png',
+      // Camera snapshot mode
+      camera:            camera            || null,
+      referenceViewport: referenceViewport || null,
+      renderTarget:      renderTarget      || null,
+      tileSize:          tileSize          || 512,
+      // Legacy mode
+      center:   resolvedCenter || null,
+      bbox:     bbox           || null,
+      zoom:     resolvedZoom,
+      width:    resolvedWidth,
+      height:   resolvedHeight,
       backgroundColor: backgroundColor
     });
 
