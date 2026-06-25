@@ -318,6 +318,7 @@ function normaliseOptions(options) {
     background:       background,
     showMissingTiles: !!options.showMissingTiles,
     signal:           options.signal,
+    _cropRect:        options._cropRect        || null,
     _viewportCenter:  options._viewportCenter || null,
     layers:           Array.isArray(options.layers) ? options.layers : [],
     provider:         (options.provider && typeof options.provider === 'string') ? options.provider : 'unknown',
@@ -540,7 +541,13 @@ async function mergeTiles(options) {
   //   May have small precision errors. Kept for backward compatibility.
 
   var rawCrop;
-  if (opts._viewportCenter &&
+  if (opts._cropRect) {
+    // Pre-computed crop rect from camera snapshot pipeline — use directly
+    rawCrop = opts._cropRect;
+    dbg('CROP from _cropRect: ' + rawCrop.left + ',' + rawCrop.top +
+        ' ' + rawCrop.width + 'x' + rawCrop.height);
+
+  } else if (opts._viewportCenter &&
       Array.isArray(opts._viewportCenter) &&
       typeof opts._viewportCenter[0] === 'number') {
 
