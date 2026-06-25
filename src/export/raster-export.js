@@ -1,8 +1,14 @@
 /**
- * Masar v3 — Raster Export Orchestrator
+ * Masar v3 — Raster Export Orchestrator  [v3.2 — Viewport-based pipeline]
  *
- * Coordinates the conversion of Map State into high-resolution raster exports.
- * Now uses direct raster tile URLs from themes.js instead of provider discovery.
+ * v3.2 changes:
+ *   - New primary path: center + zoom + outputW + outputH
+ *   - Tile range computed from viewport pixel rect (floor((right-1)/tileSize))
+ *   - Crop computed from viewport pixel rect (no geographic bbox re-derivation)
+ *   - bbox path kept as fallback for backwards compatibility
+ *
+ * This eliminates the dark strip on right/bottom caused by missing the last
+ * tile column/row, and ensures the output exactly matches MapLibre's viewport.
  */
 
 'use strict';
@@ -15,21 +21,21 @@ const themes     = require('../config/themes');
 const DEBUG_EXPORT = false;
 
 function dbg(msg) {
-  if (DEBUG_EXPORT) {
-    console.log('[raster-export] ' + msg);
-  }
+  if (DEBUG_EXPORT) console.log('[raster-export] ' + msg);
 }
 
 const VALID_FORMATS = { png: true, jpeg: true, webp: true };
 
 function checkAbort(signal) {
-  if (signal && signal.aborted) {
-    throw new Error('[raster-export] Export cancelled');
-  }
+  if (signal && signal.aborted) throw new Error('[raster-export] Export cancelled');
 }
 
 /**
  * Orchestrates the full raster export workflow.
+ *
+ * Accepts either:
+ *   A) options.center + options.zoom + options.width + options.height  ← preferred
+ *   B) options.bbox + options.zoom + options.width + options.height    ← legacy fallback
  */
 async function exportRaster(options) {
   var startTime = Date.now();
@@ -37,118 +43,155 @@ async function exportRaster(options) {
 
   // ── Validate ────────────────────────────────────────────────────────────────
 
-  if (!options.style || typeof options.style !== 'string') throw new Error('[raster-export] style is required');
-  if (!Array.isArray(options.bbox) || options.bbox.length !== 4) throw new Error('[raster-export] bbox must be [W, S, E, N]');
-  if (typeof options.zoom !== 'number') throw new Error('[raster-export] zoom is required');
-  if (typeof options.width !== 'number' || options.width <= 0) throw new Error('[raster-export] width must be > 0');
-  if (typeof options.height !== 'number' || options.height <= 0) throw new Error('[raster-export] height must be > 0');
+  if (!options.style || typeof options.style !== 'string')
+    throw new Error('[raster-export] style is required');
+  if (typeof options.zoom !== 'number')
+    throw new Error('[raster-export] zoom is required');
+  if (typeof options.width  !== 'number' || options.width  <= 0)
+    throw new Error('[raster-export] width must be > 0');
+  if (typeof options.height !== 'number' || options.height <= 0)
+    throw new Error('[raster-export] height must be > 0');
 
   var format = (options.format || 'png').toLowerCase();
-  if (!VALID_FORMATS[format]) {
+  if (!VALID_FORMATS[format])
     throw new Error('[raster-export] Unsupported format: "' + format + '"');
-  }
 
-  // ── Resolve raster tile URL directly from theme ─────────────────────────────
+  // Determine pipeline mode
+  var useViewport = Array.isArray(options.center) &&
+                    typeof options.center[0] === 'number' &&
+                    typeof options.center[1] === 'number';
+
+  var useBbox = !useViewport &&
+                Array.isArray(options.bbox) &&
+                options.bbox.length === 4;
+
+  if (!useViewport && !useBbox)
+    throw new Error('[raster-export] Either options.center [lon,lat] or options.bbox [W,S,E,N] is required');
+
+  // ── Theme ───────────────────────────────────────────────────────────────────
 
   var rasterTileURL = themes.getRasterTileURL(options.style);
-  var tileSize = themes.getRasterTileSize(options.style);
-  var bgColor = themes.getBackgroundColor(options.style);
-  dbg('Raster tile URL for "' + options.style + '": ' + rasterTileURL + ' (tileSize=' + tileSize + ', bg=rgba(' + bgColor.r + ',' + bgColor.g + ',' + bgColor.b + ',' + bgColor.alpha + '))');
+  var tileSize      = themes.getRasterTileSize(options.style);
+  var bgColor       = themes.getBackgroundColor(options.style);
 
-  // ── Compute required tiles ──────────────────────────────────────────────────
+  dbg('style="' + options.style + '" tileSize=' + tileSize + ' zoom=' + options.zoom);
 
-  checkAbort(options.signal);
-  var tileList = downloader.tilesForBBox(options.bbox, options.zoom);
-  dbg('Computed ' + tileList.length + ' required tiles');
+  // ── Compute tile list ───────────────────────────────────────────────────────
 
-  if (tileList.length === 0) {
-    throw new Error('[raster-export] Bounding box at zoom ' + options.zoom + ' requires 0 tiles.');
+  var tileList;
+  var intZoom = Math.floor(options.zoom);
+
+  if (useViewport) {
+    // ── VIEWPORT PATH (preferred) ─────────────────────────────────────────────
+    // Compute tile range directly from camera state.
+    // floor((right-1)/tileSize) ensures the last tile column/row is included.
+
+    var vtr = merger.viewportToTileRange(
+      options.center[0], options.center[1],
+      intZoom,
+      options.width, options.height,
+      tileSize
+    );
+    tileList = vtr.tileList;
+
+    dbg('VIEWPORT path: center=[' + options.center[0].toFixed(4) + ',' + options.center[1].toFixed(4) +
+        '] zoom=' + intZoom + ' tiles=' + tileList.length +
+        ' xRange=[' + vtr.xMin + '..' + vtr.xMax + '] yRange=[' + vtr.yMin + '..' + vtr.yMax + ']');
+
+  } else {
+    // ── BBOX PATH (legacy fallback) ───────────────────────────────────────────
+    tileList = downloader.tilesForBBox(options.bbox, options.zoom);
+    dbg('BBOX path: zoom=' + intZoom + ' tiles=' + tileList.length);
   }
 
-  // ── Download tiles using direct URL template ────────────────────────────────
+  if (tileList.length === 0)
+    throw new Error('[raster-export] Viewport at zoom ' + intZoom + ' requires 0 tiles.');
+
+  // ── Download tiles ──────────────────────────────────────────────────────────
 
   checkAbort(options.signal);
-  var downloadStart = Date.now();
 
-  // Use the direct raster tile URL template — bypass provider discovery
   var downloadResult = await downloader.downloadTiles({
-    type: 'raster',
-    ofmStyleId: options.style,           // used as cache key
-    tiles: tileList,
-    signal: options.signal,
-    // Override: inject the direct URL template
+    type:         'raster',
+    ofmStyleId:   options.style,
+    tiles:        tileList,
+    signal:       options.signal,
     _directTileURL: rasterTileURL,
   });
 
-  var downloadDuration = Date.now() - downloadStart;
-  dbg('Download phase: ' + downloadDuration + 'ms');
-
-  // ── Verify downloads ────────────────────────────────────────────────────────
-
   checkAbort(options.signal);
-  var validTiles = [];
-  for (var i = 0; i < downloadResult.tiles.length; i++) {
-    var t = downloadResult.tiles[i];
-    if (t.buffer && t.buffer.length > 0) {
-      validTiles.push(t);
-    }
-  }
 
-  if (validTiles.length === 0) {
+  var validTiles = downloadResult.tiles.filter(function(t) {
+    return t.buffer && t.buffer.length > 0;
+  });
+
+  if (validTiles.length === 0)
     throw new Error('[raster-export] No valid raster tiles downloaded.');
-  }
+
+  dbg('Downloaded: ' + validTiles.length + '/' + tileList.length + ' tiles valid');
 
   // ── Merge tiles ─────────────────────────────────────────────────────────────
 
   checkAbort(options.signal);
-  var mergeStart = Date.now();
 
-  var mergeResult = await merger.mergeTiles({
-    tiles: validTiles,
-    bbox: options.bbox,
-    zoom: options.zoom,
-    width: options.width,
-    height: options.height,
-    tileSize: tileSize,
-    outputFormat: format,
+  // For viewport path: pass center/zoom so merger can compute crop from pixels.
+  // For bbox path: pass bbox as before.
+  var mergeOptions = {
+    tiles:           validTiles,
+    zoom:            intZoom,
+    width:           options.width,
+    height:          options.height,
+    tileSize:        tileSize,
+    outputFormat:    format,
     backgroundColor: options.backgroundColor || bgColor,
-    provider: 'direct',
-    style: options.style,
-    signal: options.signal,
-  });
+    provider:        'direct',
+    style:           options.style,
+    signal:          options.signal,
+  };
 
-  var mergeDuration = Date.now() - mergeStart;
-  dbg('Merge phase: ' + mergeDuration + 'ms');
+  if (useViewport) {
+    mergeOptions.center = options.center;   // [lon, lat]
+    mergeOptions.bbox   = null;             // not used in viewport mode
+  } else {
+    mergeOptions.bbox   = options.bbox;
+    mergeOptions.center = null;
+  }
+
+  var mergeResult = await mergeTilesWithViewport(mergeOptions);
 
   // ── Validate & return ───────────────────────────────────────────────────────
 
   checkAbort(options.signal);
 
-  if (!mergeResult.buffer || !Buffer.isBuffer(mergeResult.buffer) || mergeResult.buffer.length === 0) {
+  if (!mergeResult.buffer || !Buffer.isBuffer(mergeResult.buffer) || mergeResult.buffer.length === 0)
     throw new Error('[raster-export] Pipeline returned empty buffer.');
-  }
 
   var totalDurationMs = Date.now() - startTime;
   var exportId = crypto.randomUUID();
 
+  dbg('Export complete: ' + mergeResult.width + 'x' + mergeResult.height +
+      ' in ' + totalDurationMs + 'ms');
+
   return {
-    buffer: mergeResult.buffer,
-    format: format,
-    width: mergeResult.width,
-    height: mergeResult.height,
-    bbox: mergeResult.bounds,
-    zoom: options.zoom,
+    buffer:  mergeResult.buffer,
+    format:  format,
+    width:   mergeResult.width,
+    height:  mergeResult.height,
+    bbox:    mergeResult.bounds,
+    zoom:    intZoom,
     metadata: {
       exportId:      exportId,
       provider:      'direct-raster',
       style:         options.style,
       rasterTileURL: rasterTileURL,
-      zoom:          options.zoom,
-      bbox:          options.bbox,
+      zoom:          intZoom,
+      center:        options.center || null,
+      bbox:          options.bbox   || null,
       exportWidth:   mergeResult.width,
       exportHeight:  mergeResult.height,
       tileCount:     validTiles.length,
       generatedAt:   new Date().toISOString(),
+      pipeline:      useViewport ? 'viewport' : 'bbox',
     },
     stats: {
       download:        downloadResult.stats,
@@ -158,6 +201,23 @@ async function exportRaster(options) {
   };
 }
 
-module.exports = {
-  exportRaster,
-};
+/**
+ * Extended mergeTiles wrapper that supports viewport-based cropping.
+ * When center is provided, uses merger.viewportToPixelRect() for the crop.
+ * Falls back to standard bbox-based crop when center is null.
+ */
+async function mergeTilesWithViewport(options) {
+  if (options.center) {
+    // Viewport mode: inject center into merger options
+    // The merger will use viewportToPixelRect() instead of bboxToPixelRect()
+    return await merger.mergeTiles(Object.assign({}, options, {
+      // Pass a synthetic bbox so normaliseOptions doesn't throw
+      // The actual crop will use center + zoom via viewportToPixelRect
+      bbox:          [-180, -85, 180, 85],  // placeholder — not used for crop
+      _viewportCenter: options.center,       // actual crop source
+    }));
+  }
+  return await merger.mergeTiles(options);
+}
+
+module.exports = { exportRaster };
